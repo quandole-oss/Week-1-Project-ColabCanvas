@@ -1,0 +1,22 @@
+{
+  "rules": {
+    "cursors": {
+      "$roomId": {
+        ".read": "auth != null",
+        "$userId": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.uid == $userId"
+        }
+      }
+    },
+    "presence": {
+      "$roomId": {
+        ".read": "auth != null",
+        "$userId": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.uid == $userId"
+        }
+      }
+    }
+  }
+}
