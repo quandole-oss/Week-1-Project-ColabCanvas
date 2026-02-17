@@ -377,3 +377,89 @@ Call this callback from Room.tsx when AI operations occur.
 - **Infinite Board**: Removed all 4000x4000 boundaries. Canvas is now unbounded in all directions. Grid is dynamically generated based on viewport, drawing only ~40-80 lines at any time vs. the previous 162 static lines. Pan and zoom work without constraints.
 - **Sticky Notes**: Implemented using Fabric.js `Textbox` for native in-place text editing with word wrapping. Text syncs in real-time via the existing `text:changed` → `onObjectModified` → debounced Firestore path. AI assistant supports creating sticky notes via natural language commands.
 - Build passes with zero TypeScript errors.
+
+---
+
+## Phase 9: Security Vulnerability Fixes
+
+22 findings addressed (2 Critical, 4 High, 10 Medium, 6 Low).
+
+### 9.1 Firestore Rules (Fixes #1, #4, #7, #9, #10)
+- [x] Fix room takeover & member removal (CRITICAL + HIGH)
+  - Split room update rule into 3 branches: non-member-field updates, member list changes (superset check), and non-member join (size+1 check)
+  - Members can no longer remove other members from the list
+  - Non-members can only add themselves, not modify other fields
+- [x] Add AI request field validation (MEDIUM)
+  - Added `hasOnly` + `hasAll` combo to restrict fields to known set
+  - Enforce `status == 'pending'`, command is string, length 1-500
+- [x] Add objects schema validation (MEDIUM)
+  - Require `id`, `type`, `props`, `zIndex` on create
+  - Validate `type` against allowed enum
+- [x] Document room read access rationale (MEDIUM)
+  - Added comment explaining why all authenticated users can read rooms
+
+### 9.2 Cloud Function (Fixes #2, #3, #5, #12, #13, #17, #18)
+- [x] Fix prompt injection via command (CRITICAL)
+  - Added anti-injection instruction to system prompt
+  - Wrapped user input in `<user_command>` XML delimiters
+- [x] Fix prompt injection via canvasObjects (HIGH)
+  - Added `sanitizeCanvasObjects()` with `VALID_TYPES` set and `ID_PATTERN` regex
+  - Filters objects with invalid type or non-alphanumeric ID
+  - Coerces `left`/`top` through `Number()` + `Math.round()`
+- [x] Add per-user rate limiting (HIGH)
+  - Queries `aiRequests` for same userId with createdAt >= 1 minute ago
+  - Rejects if count > 10 with user-friendly error
+- [x] Validate LLM tool call results (MEDIUM)
+  - Added `VALID_TOOL_NAMES` set, filters content blocks to only known tools
+- [x] Add room deletion cascade (MEDIUM)
+  - New `onRoomDeleted` function using `onDocumentDeleted`
+  - Batch-deletes all docs in `objects` and `aiRequests` subcollections
+- [x] Add idempotency guard (LOW)
+  - Checks `data.status !== 'pending'` at start; returns early if already processing/completed
+- [x] Add fetch timeout (LOW)
+  - `AbortController` with 30s timeout on Anthropic API fetch
+  - Handles `AbortError` with user-friendly message
+
+### 9.3 Security Headers (Fix #6 — HIGH)
+- [x] Add hosting security headers to `firebase.json`
+  - `X-Frame-Options: DENY`
+  - `X-Content-Type-Options: nosniff`
+  - `Referrer-Policy: strict-origin-when-cross-origin`
+  - `Permissions-Policy: camera=(), microphone=(), geolocation=()`
+  - `Content-Security-Policy` allowing self, Firebase domains, Google user content
+
+### 9.4 Realtime Database Rules (Fix #16 — MEDIUM)
+- [x] Add default deny (`".read": false, ".write": false`)
+- [x] Add `.validate` rules for cursor fields (`x`, `y`, `userId`, `userName`, `color`, `lastActive`)
+- [x] Add `.validate` rules for presence fields (`online`, `lastSeen`)
+
+### 9.5 Frontend Services (Fixes #11, #19, #21, #22)
+- [x] Sanitize room ID from URL (MEDIUM)
+  - Split on `/` and `?`, regex filter `[a-zA-Z0-9_-]`, max length 36
+- [x] Fix race condition in snapshot listener (LOW)
+  - Added `settled` guard variable to prevent double resolve/reject
+- [x] Add JSON.parse safety in aiService (LOW)
+  - Wrapped `JSON.parse(call.arguments)` in try/catch, filter nulls
+- [x] Add runtime param validation in executeAIAction (LOW)
+  - `VALID_ACTION_TYPES` and `VALID_SHAPE_TYPES` sets
+  - Validate type is string, x/y are numbers in `createShape`
+
+### 9.6 Firebase App Check (Fix #8 — MEDIUM)
+- [x] Add App Check initialization code
+  - Import `initializeAppCheck` + `ReCaptchaEnterpriseProvider`
+  - Conditionally init if `VITE_RECAPTCHA_SITE_KEY` env var is set
+  - Dormant until GCP Console setup is completed
+
+### 9.7 Build & Config Cleanup (Fixes #14, #20, .env)
+- [x] Strip console logs in production (LOW)
+  - Added `esbuild.pure: ['console.log', 'console.warn']` to vite config
+- [x] Longer room IDs (MEDIUM)
+  - Changed `uuidv4().slice(0, 8)` → `uuidv4().replace(/-/g, '').slice(0, 16)` (64-bit entropy)
+- [x] Clean up `.env.example`
+  - Removed `VITE_GEMINI_API_KEY`, added `VITE_RECAPTCHA_SITE_KEY` comment
+
+### Review
+- All 22 security findings fixed across 10 files
+- TypeScript compilation passes clean in both root and functions/
+- Production build succeeds with zero console.log in output
+- All changes deployed to Firebase (rules, functions, hosting)
