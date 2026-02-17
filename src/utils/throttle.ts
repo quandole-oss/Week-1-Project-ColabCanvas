@@ -23,19 +23,38 @@ export function throttle<T extends (...args: any[]) => any>(
   };
 }
 
+export type DebouncedFunction<T extends (...args: any[]) => any> =
+  ((...args: Parameters<T>) => void) & { flush: () => void };
+
 export function debounce<T extends (...args: any[]) => any>(
   func: T,
   wait: number
-): (...args: Parameters<T>) => void {
+): DebouncedFunction<T> {
   let timeout: ReturnType<typeof setTimeout> | null = null;
+  let lastArgs: Parameters<T> | null = null;
+  let lastThis: any = null;
 
-  return function (this: any, ...args: Parameters<T>) {
+  const debounced = function (this: any, ...args: Parameters<T>) {
+    lastArgs = args;
+    lastThis = this;
     if (timeout) {
       clearTimeout(timeout);
     }
     timeout = setTimeout(() => {
-      func.apply(this, args);
+      func.apply(lastThis, lastArgs!);
       timeout = null;
+      lastArgs = null;
     }, wait);
+  } as DebouncedFunction<T>;
+
+  debounced.flush = function () {
+    if (timeout && lastArgs) {
+      clearTimeout(timeout);
+      func.apply(lastThis, lastArgs);
+      timeout = null;
+      lastArgs = null;
+    }
   };
+
+  return debounced;
 }

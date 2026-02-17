@@ -5,9 +5,11 @@ interface OnlineUsersProps {
   users: PresenceData[];
   currentUserId: string;
   remoteCursors?: Map<string, CursorState>;
+  presenceConnected?: boolean;
+  debugError?: string | null;
 }
 
-export function OnlineUsers({ users, currentUserId, remoteCursors }: OnlineUsersProps) {
+export function OnlineUsers({ users, currentUserId, remoteCursors, presenceConnected, debugError }: OnlineUsersProps) {
   return (
     <div className="bg-white/70 backdrop-blur-md rounded-xl p-3 shadow-lg border border-white/20">
       <h3 className="text-xs text-gray-500 mb-2 uppercase tracking-wide font-medium">

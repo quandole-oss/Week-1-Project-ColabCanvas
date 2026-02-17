@@ -2,6 +2,7 @@ import {
   collection,
   doc,
   setDoc,
+  updateDoc,
   deleteDoc,
   onSnapshot,
   query,
@@ -49,6 +50,34 @@ export async function syncObject(
   }
 
   await setDoc(objectRef, data, { merge: true });
+}
+
+// Partially update specific props fields using dot notation.
+// Unlike syncObject (which replaces the entire props object),
+// this only touches the fields you pass — preventing accidental
+// overwrite of text when moving, or position when editing text.
+export async function syncObjectPartial(
+  roomId: string,
+  objectId: string,
+  partialProps: Partial<CanvasObjectProps>,
+  userId: string
+): Promise<void> {
+  if (!db) throw new Error('Firestore not initialized');
+  const objectRef = doc(db, 'rooms', roomId, 'objects', objectId);
+  const now = Timestamp.now();
+
+  // Build dot-notation update: { "props.text": "Hello", "props.left": 100 }
+  const update: Record<string, unknown> = {
+    updatedBy: userId,
+    updatedAt: now,
+  };
+  for (const [key, value] of Object.entries(partialProps)) {
+    if (value !== undefined) {
+      update[`props.${key}`] = value;
+    }
+  }
+
+  await updateDoc(objectRef, update);
 }
 
 // Delete an object

@@ -463,3 +463,128 @@ Call this callback from Room.tsx when AI operations occur.
 - TypeScript compilation passes clean in both root and functions/
 - Production build succeeds with zero console.log in output
 - All changes deployed to Firebase (rules, functions, hosting)
+
+---
+
+## Phase 10: Critical Bug Fix — Text Content Being Cleared (State Regression)
+
+### Root Cause Analysis
+
+**The Problem:** Text inside textboxes/sticky notes disappears after a short delay. The component stays but the text string becomes empty.
+
+**3 root causes identified:**
+
+1. **No "editing lock" on incoming sync updates (useRealtimeSync.ts)**
+   - The BroadcastChannel `update` handler (line 56-68) directly calls `setObjects` with NO check for whether the user is editing that object
+   - The Firebase `onModify` handler (line 130-141) uses `localPendingUpdates` which only blocks ONE echo — rapid edits can cause stale echoes to slip through and overwrite the React state
+   - Result: React state gets overwritten with stale text while user is editing. When user clicks away, the sync effect applies the stale state to the Fabric canvas
+
+2. **Sync effect only guards "active object", not "editing object" (Canvas.tsx line 1416-1421)**
+   - The sync effect skips `updateFabricObject` only when the object is the `activeObject` (selected)
+   - But after `text:editing:exited`, if no debounced update is pending, the sync effect can apply stale text from the React state
+
+3. **`localPendingUpdates` uses Set (boolean flag) instead of counter (useRealtimeSync.ts line 29)**
+   - When multiple writes happen rapidly, the first echo clears the flag, causing subsequent echoes to process as "remote" updates that overwrite local state
+
+### Plan (3 changes, minimal impact)
+
+- [x] **10.1 Add Watchdog Log** — Add `console.trace()` in `updateFabricObject` when text is being set to empty string (Canvas.tsx)
+  - Simple diagnostic: if `props.text` is `""` and `tb.text` is not empty, log a trace
+
+- [x] **10.2 Implement Editing Lock (Optimistic Locking)** — Track which objects are being edited and block incoming updates for those objects
+  - In `useRealtimeSync.ts`: Add `editingObjectIds` ref (Set<string>)
+  - Add `setEditingObjectId(id: string | null)` function to mark/unmark objects as being edited
+  - In BroadcastChannel `update` handler: skip updates for objects in `editingObjectIds`
+  - In Firebase `onModify` handler: skip updates for objects in `editingObjectIds`
+  - In Canvas.tsx: call `setEditingObjectId(id)` on `text:editing:entered` and `setEditingObjectId(null)` on `text:editing:exited`
+  - In sync effect: also skip objects in `editingObjectIds` (not just active object)
+
+- [x] **10.3 Fix `localPendingUpdates` to use counter instead of boolean Set**
+  - Change from `Set<string>` to `Map<string, number>` (refcount)
+  - `add` increments the counter, `onModify` decrements it
+  - Only process remote updates when counter reaches 0
+
+### Files modified:
+1. `src/hooks/useRealtimeSync.ts` — editing lock + pending updates counter
+2. `src/components/Canvas/Canvas.tsx` — watchdog log + wire editing events to lock
+3. `src/components/Layout/Room.tsx` — pass new editing lock callback to Canvas
+
+### Review
+- **Watchdog**: Added `console.trace()` in `updateFabricObject` for both sticky and textbox types — fires when text is about to be cleared (non-empty → empty), showing the exact call stack
+- **Editing Lock**: 3-layer protection:
+  1. `useRealtimeSync` blocks incoming BroadcastChannel and Firebase updates for objects being edited
+  2. Canvas sync effect skips objects where `isEditing` is true (secondary guard)
+  3. `updateFabricObject` has existing `isEditing` check (tertiary guard)
+  - Lock is acquired on `text:editing:entered`, released on `text:editing:exited` (after flushing pending sync)
+- **Pending Updates Refcount**: Changed `Set<string>` → `Map<string, number>`. Each `syncObject` call increments the count; each Firebase echo decrements it. Remote updates only process when the count is 0, preventing stale echoes from slipping through during rapid edits
+- TypeScript compiles clean, Vite build succeeds
+
+---
+
+## Phase 10b: Production Text Fix — Component Lifecycle & Ref Persistence
+
+### Root Cause (Found)
+
+**The `text:editing:exited` handler was silently failing.** When Fabric.js fires this event, it has already deselected the object — so `canvas.getActiveObject()` returns `null`. The code that was supposed to sync the final text on blur was never executing. Combined with removing the `text:changed` handler (to stop Firestore echo storms), there was **zero sync path for text**.
+
+### 4 Bugs Fixed
+
+- [x] **10b.1 Fix `text:editing:exited` handler** — Store the editing Textbox in a ref (`editingTextboxRef`) when editing starts. Use that ref (not `getActiveObject`) in the exit handler to reliably read the final text and sync it.
+
+- [x] **10b.2 Ref-based text persistence (`textBufferRef`)** — A `Map<string, string>` outside the render cycle that buffers every keystroke. If the sync effect recreates the Fabric object (unmount/remount equivalent), the new object pulls its text from this buffer instead of using the stale server value.
+
+- [x] **10b.3 Guard `fontSize`/`fontFamily` against undefined** — `updateFabricObject` now uses `props.fontSize ?? tb.fontSize ?? 16` instead of bare `props.fontSize`. Prevents text becoming invisible (0px font) when a partial Firestore update omits these fields.
+
+- [x] **10b.4 Buffer-aware sync effect** — Both the "update existing" and "create new remote" code paths in the sync effect check `textBufferRef` before applying server state. If the user has typed text that hasn't synced yet, the buffer wins.
+
+### Files modified
+1. `src/components/Canvas/Canvas.tsx` — all 4 fixes
+
+---
+
+## Phase 11: Presence System Fix — Persistent Connection Model
+
+### Root Cause Analysis
+
+**The Problem:** The Online indicator shows `(0)` even when the user is actively in a session.
+
+**3 root causes identified:**
+
+1. **`onDisconnect()` not awaited before writing `online: true` (presenceSync.ts)**
+   - The old code called `onDisconnect().set(...)` and `set(presenceRef, { online: true })` without awaiting the onDisconnect registration. The server might not have had the cleanup handler registered before the online write landed, meaning disconnects could leave stale `online: true` entries.
+
+2. **Cleanup race condition — `setUserOffline()` in React effect cleanup (usePresence.ts)**
+   - The useEffect cleanup called `setUserOffline()` asynchronously. When React re-runs the effect (e.g. on HMR or dep change), the cleanup's offline write could arrive at Firebase RTDB **after** the new setup's online write, immediately marking the user offline. This is the classic async cleanup race.
+
+3. **No `.info/connected` listener for RTDB reconnection (usePresence.ts)**
+   - The hook only announced presence once on mount. If the RTDB connection dropped and reconnected (common on mobile, tab sleep, network switches), presence was never re-announced. The server-side `onDisconnect` handler had already cleaned up the entry, so the user appeared offline until a full page reload.
+
+### Plan (3 changes)
+
+- [x] **11.1 Rewrite `presenceSync.ts` — Await `onDisconnect` before writing online**
+  - `setUserOnline()` now does: `await onDisconnect(ref).set({ online: false })` first, THEN `await set(ref, { online: true })`
+  - Added `getConnectedRef()` export for `.info/connected` reference
+  - Heavy `console.log` instrumentation throughout
+
+- [x] **11.2 Rewrite `usePresence.ts` — Persistent connection model**
+  - Removed `setUserOffline()` from effect cleanup entirely (let server-side `onDisconnect` handle it)
+  - Added `.info/connected` listener that calls `setUserOnline()` on every RTDB (re)connect
+  - Added `isConnected` state returned from hook
+  - Added `document.visibilitychange` listener to re-announce on tab focus (browsers throttle background tabs)
+  - Cleanup only tears down listeners, never writes offline — eliminates the race condition
+
+- [x] **11.3 Wire `isConnected` into UI — Visual debug indicator**
+  - `Room.tsx`: Destructured `isConnected` from `usePresence`, passed to `OnlineUsers`
+  - `OnlineUsers.tsx`: Added debug display showing `RTDB: Connected/Disconnected` and truncated UID
+
+### Files modified
+1. `src/services/presenceSync.ts` — awaited onDisconnect, added getConnectedRef()
+2. `src/hooks/usePresence.ts` — persistent connection model, no client-side offline writes
+3. `src/components/Layout/Room.tsx` — pass presenceConnected to OnlineUsers
+4. `src/components/Presence/OnlineUsers.tsx` — debug connection status display
+
+### Review
+- **Server-side cleanup only**: The React effect cleanup no longer writes `online: false`. Firebase's `onDisconnect` handler (registered server-side) does this automatically. This completely eliminates the race condition where cleanup's write arrives after the next setup's write.
+- **Reconnection resilience**: The `.info/connected` listener fires every time the RTDB connection is (re)established. Each time, it re-runs `setUserOnline()` which registers a fresh `onDisconnect` handler and writes `online: true`. Works across network drops, tab sleep/wake, and mobile backgrounding.
+- **Visual debug**: A small debug indicator in the OnlineUsers panel shows RTDB connection state and truncated user ID, making it easy to verify presence is working without opening DevTools.
+- TypeScript compiles clean, Vite build succeeds, deployed to Firebase Hosting.

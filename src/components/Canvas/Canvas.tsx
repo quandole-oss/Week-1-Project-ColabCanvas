@@ -32,6 +32,8 @@ interface CanvasProps {
   userId: string;
   onObjectCreated?: (id: string, type: ShapeType, props: CanvasObjectProps, zIndex: number) => void;
   onObjectModified?: (id: string, props: CanvasObjectProps) => void;
+  onFlushSync?: () => void;
+  onEditingObjectChange?: (id: string | null) => void;
   onObjectDeleted?: (id: string) => void;
   onCursorMove?: (x: number, y: number, selectedObjectId?: string | null, isMoving?: boolean) => void;
   onViewportCenterChange?: (getCenter: () => { x: number; y: number }) => void;
@@ -43,6 +45,8 @@ interface CanvasProps {
 export function Canvas({
   onObjectCreated,
   onObjectModified,
+  onFlushSync,
+  onEditingObjectChange,
   onObjectDeleted,
   onCursorMove,
   onViewportCenterChange,
@@ -72,6 +76,11 @@ export function Canvas({
   const [contextMenuPos, setContextMenuPos] = useState<{ left: number; top: number } | null>(null);
   // Store object state before modification for undo
   const objectStateBeforeModifyRef = useRef<Map<string, CanvasObjectProps>>(new Map());
+  // Ref-based text persistence: survives Fabric object recreation by sync effect.
+  // Key = object ID, Value = latest text typed by the user.
+  const textBufferRef = useRef<Map<string, string>>(new Map());
+  // Track the Fabric Textbox currently being edited (getActiveObject is unreliable in exit event)
+  const editingTextboxRef = useRef<{ id: string; obj: Textbox } | null>(null);
 
   const {
     fabricRef,
@@ -643,25 +652,57 @@ export function Canvas({
     };
   }, [fabricRef, addToHistory]);
 
-  // Sync sticky note text changes to remote users
+  // Text editing lifecycle: lock during editing, buffer keystrokes, sync only on blur.
   useEffect(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
 
-    const handleTextChanged = () => {
+    // --- ENTER: lock this object, store a ref so exit handler can find it ---
+    const handleEditingEntered = () => {
       const obj = canvas.getActiveObject();
       if (!obj || !(obj instanceof Textbox)) return;
       const id = (obj as FabricObject & { id?: string }).id;
-      if (id && onObjectModified) {
-        onObjectModified(id, getObjectProps(obj));
+      if (!id) return;
+      editingTextboxRef.current = { id, obj };
+      if (onEditingObjectChange) onEditingObjectChange(id);
+    };
+
+    // --- CHANGED: buffer the text in a ref (survives component recreation) ---
+    // No remote sync here — we only sync on blur.
+    const handleTextChanged = () => {
+      const editing = editingTextboxRef.current;
+      if (editing) {
+        textBufferRef.current.set(editing.id, editing.obj.text || '');
       }
     };
 
-    canvas.on('text:changed', handleTextChanged);
-    return () => {
-      canvas.off('text:changed', handleTextChanged);
+    // --- EXIT: push final text and release lock ---
+    // IMPORTANT: canvas.getActiveObject() is null here (Fabric deselects before
+    // firing this event), so we use editingTextboxRef instead.
+    const handleEditingExited = () => {
+      const editing = editingTextboxRef.current;
+      if (editing && onObjectModified) {
+        // Read final text directly from the Fabric Textbox object
+        onObjectModified(editing.id, getObjectProps(editing.obj));
+      }
+      // Flush the debounced update immediately (don't wait 100ms)
+      if (onFlushSync) onFlushSync();
+      // Clear the text buffer now that the final value has been synced
+      if (editing) textBufferRef.current.delete(editing.id);
+      // Release editing lock (2s grace period in useRealtimeSync)
+      if (onEditingObjectChange) onEditingObjectChange(null);
+      editingTextboxRef.current = null;
     };
-  }, [fabricRef, onObjectModified]);
+
+    canvas.on('text:editing:entered', handleEditingEntered);
+    canvas.on('text:changed', handleTextChanged);
+    canvas.on('text:editing:exited', handleEditingExited);
+    return () => {
+      canvas.off('text:editing:entered', handleEditingEntered);
+      canvas.off('text:changed', handleTextChanged);
+      canvas.off('text:editing:exited', handleEditingExited);
+    };
+  }, [fabricRef, onObjectModified, onFlushSync, onEditingObjectChange]);
 
   // Handle cursor movement for broadcasting
   useEffect(() => {
@@ -1404,19 +1445,34 @@ export function Canvas({
       );
 
       if (existingLocal) {
-        // Skip if user is currently interacting with this object (prevents position fighting)
+        // Skip if user is currently interacting with or editing this object
         const activeObj = canvas.getActiveObject();
         if (activeObj && (activeObj as FabricObject & { id?: string }).id === id) {
           return;
         }
-        // Update existing object
-        updateFabricObject(existingLocal, obj);
+        // Also skip if a Textbox is in editing mode (optimistic lock — secondary guard)
+        if (existingLocal instanceof Textbox && (existingLocal as any).isEditing) {
+          return;
+        }
+        // Update existing object — but preserve buffered text if it exists
+        const buffered = textBufferRef.current.get(id);
+        if (buffered !== undefined && (obj.type === 'sticky' || obj.type === 'textbox')) {
+          updateFabricObject(existingLocal, { ...obj, props: { ...obj.props, text: buffered } });
+        } else {
+          updateFabricObject(existingLocal, obj);
+        }
         return;
       }
 
       // Create new remote object
       console.log('[Canvas] Creating new remote object:', id, obj.type);
-      const fabricObj = createFabricObject(obj);
+      // Ref-based persistence: if user typed text that hasn't synced yet,
+      // restore it onto the newly created object so it isn't lost.
+      const bufferedText = textBufferRef.current.get(id);
+      const objToCreate = bufferedText !== undefined
+        ? { ...obj, props: { ...obj.props, text: bufferedText } }
+        : obj;
+      const fabricObj = createFabricObject(objToCreate);
       if (fabricObj) {
         (fabricObj as FabricObject & { id: string }).id = id;
         canvas.add(fabricObj);
@@ -2038,8 +2094,8 @@ function updateFabricObject(fabricObj: FabricObject, obj: CanvasObject) {
     const tb = fabricObj as Textbox;
     tb.set({
       width: props.width,
-      fontSize: props.fontSize,
-      fontFamily: props.fontFamily,
+      fontSize: props.fontSize ?? tb.fontSize ?? 16,
+      fontFamily: props.fontFamily ?? tb.fontFamily ?? 'Times New Roman',
       fill: props.textColor || '#000000',
       backgroundColor: props.fill || '#FEF3C7',
     });
@@ -2053,9 +2109,13 @@ function updateFabricObject(fabricObj: FabricObject, obj: CanvasObject) {
       (tb as any)._stickyHeightOverrideApplied = true;
     }
     tb.height = stickyH;
-    // Only update text if changed (prevents interrupting active editing)
+    // Only update text if changed AND not currently editing
     if (props.text !== undefined && tb.text !== props.text) {
       if (!(tb as any).isEditing) {
+        // Watchdog: trace when text is being set to empty while it was non-empty
+        if (!props.text && tb.text) {
+          console.trace(`[Watchdog] Sticky text cleared: "${tb.text}" → ""`);
+        }
         tb.set({ text: props.text });
       }
     }
@@ -2065,14 +2125,19 @@ function updateFabricObject(fabricObj: FabricObject, obj: CanvasObject) {
     const tb = fabricObj as Textbox;
     tb.set({
       width: props.width,
-      fontSize: props.fontSize,
-      fontFamily: props.fontFamily,
+      fontSize: props.fontSize ?? tb.fontSize ?? 16,
+      fontFamily: props.fontFamily ?? tb.fontFamily ?? 'sans-serif',
       fill: props.textColor || '#000000',
       backgroundColor: props.fill || 'transparent',
     });
     (tb as FabricObject & { customType?: string }).customType = 'textbox';
+    // Only update text if changed AND not currently editing
     if (props.text !== undefined && tb.text !== props.text) {
       if (!(tb as any).isEditing) {
+        // Watchdog: trace when text is being set to empty while it was non-empty
+        if (!props.text && tb.text) {
+          console.trace(`[Watchdog] Textbox text cleared: "${tb.text}" → ""`);
+        }
         tb.set({ text: props.text });
       }
     }

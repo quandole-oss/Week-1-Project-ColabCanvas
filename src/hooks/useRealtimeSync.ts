@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { isFirebaseConfigured } from '../services/firebase';
 import {
   syncObject,
+  syncObjectPartial,
   deleteObject,
   subscribeToObjects,
   ensureRoom,
@@ -26,9 +27,12 @@ type SyncMessage =
 export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
   const [objects, setObjects] = useState<Map<string, CanvasObject>>(new Map());
   const [isConnected, setIsConnected] = useState(false);
-  const localPendingUpdates = useRef<Set<string>>(new Set());
+  // Refcount of pending local writes per object — only process remote echoes when count hits 0
+  const localPendingUpdates = useRef<Map<string, number>>(new Map());
   const broadcastChannel = useRef<BroadcastChannel | null>(null);
   const objectsRef = useRef<Map<string, CanvasObject>>(new Map());
+  // Track objects currently being text-edited (optimistic lock)
+  const editingObjectIds = useRef<Set<string>>(new Set());
 
   // Keep objectsRef in sync with objects state
   useEffect(() => {
@@ -54,6 +58,8 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
             return next;
           });
         } else if (msg.type === 'update') {
+          // Skip if user is currently editing this object (optimistic lock)
+          if (editingObjectIds.current.has(msg.id)) return;
           setObjects((prev) => {
             const next = new Map(prev);
             const obj = next.get(msg.id);
@@ -128,11 +134,19 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
           },
           // On modify
           (obj) => {
-            // Skip if this is our own pending update echoing back
-            if (localPendingUpdates.current.has(obj.id)) {
-              localPendingUpdates.current.delete(obj.id);
+            // Skip if this is our own pending update echoing back (refcount)
+            const pending = localPendingUpdates.current.get(obj.id) ?? 0;
+            if (pending > 0) {
+              const next = pending - 1;
+              if (next === 0) {
+                localPendingUpdates.current.delete(obj.id);
+              } else {
+                localPendingUpdates.current.set(obj.id, next);
+              }
               return;
             }
+            // Skip if user is currently editing this object (optimistic lock)
+            if (editingObjectIds.current.has(obj.id)) return;
 
             setObjects((prev) => {
               const next = new Map(prev);
@@ -193,7 +207,7 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
 
       // Sync to Firebase if configured, or broadcast in demo mode
       if (isFirebaseConfigured) {
-        localPendingUpdates.current.add(id);
+        localPendingUpdates.current.set(id, (localPendingUpdates.current.get(id) ?? 0) + 1);
         try {
           await syncObject(roomId, id, type, props, zIndex, odId, true);
         } catch (error) {
@@ -235,21 +249,11 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
 
       // Sync to Firebase if configured, or broadcast in demo mode
       if (isFirebaseConfigured) {
-        localPendingUpdates.current.add(id);
-        // Merge with existing props so Firestore keeps all fields
-        // (setDoc merge:true replaces the entire props object, so partial
-        // updates like move-only would delete text/fontSize/etc.)
-        const mergedProps = { ...existingObj.props, ...props };
+        localPendingUpdates.current.set(id, (localPendingUpdates.current.get(id) ?? 0) + 1);
         try {
-          await syncObject(
-            roomId,
-            id,
-            existingObj.type,
-            mergedProps,
-            existingObj.zIndex,
-            odId,
-            false
-          );
+          // Use partial update (dot notation) so only the changed fields
+          // are written — prevents text being overwritten by a move, etc.
+          await syncObjectPartial(roomId, id, props, odId);
         } catch (error) {
           console.error('Failed to update object:', error);
         }
@@ -322,12 +326,40 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
     return count;
   }, [roomId]);
 
+  // Flush any pending debounced update immediately (e.g. when text editing exits)
+  const flushPendingUpdate = useCallback(() => {
+    (updateObject as unknown as { flush?: () => void }).flush?.();
+  }, [updateObject]);
+
+  // Mark/unmark an object as being actively text-edited (optimistic lock).
+  // While locked, incoming remote/sync updates for this object are ignored.
+  // On unlock, a 2-second grace period keeps the lock active to absorb
+  // late-arriving Firestore echoes that would otherwise overwrite the text.
+  const editingLockTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const setEditingObjectId = useCallback((id: string | null) => {
+    if (editingLockTimer.current) {
+      clearTimeout(editingLockTimer.current);
+      editingLockTimer.current = null;
+    }
+    if (id) {
+      editingObjectIds.current.add(id);
+    } else {
+      // Grace period: keep lock for 2s after blur to absorb stale echoes
+      editingLockTimer.current = setTimeout(() => {
+        editingObjectIds.current.clear();
+        editingLockTimer.current = null;
+      }, 2000);
+    }
+  }, []);
+
   return {
     objects,
     isConnected,
     createObject,
     updateObject,
+    flushPendingUpdate,
     removeObject,
     clearAllObjects,
+    setEditingObjectId,
   };
 }

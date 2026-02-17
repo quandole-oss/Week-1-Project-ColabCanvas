@@ -43,14 +43,14 @@ export function Room({ roomId }: RoomProps) {
     userColor: user.color,
   });
 
-  const { onlineUsers } = usePresence({
+  const { onlineUsers, isConnected: presenceConnected, debugError: presenceDebugError } = usePresence({
     roomId,
     odId: user.uid,
     userName: safeDisplayName,
     userColor: user.color,
   });
 
-  const { objects, isConnected, createObject, updateObject, removeObject, clearAllObjects } =
+  const { objects, isConnected, createObject, updateObject, flushPendingUpdate, removeObject, clearAllObjects, setEditingObjectId } =
     useRealtimeSync({
       roomId,
       odId: user.uid,
@@ -223,6 +223,8 @@ export function Room({ roomId }: RoomProps) {
           userId={user.uid}
           onObjectCreated={handleObjectCreated}
           onObjectModified={handleObjectModified}
+          onFlushSync={flushPendingUpdate}
+          onEditingObjectChange={setEditingObjectId}
           onObjectDeleted={handleObjectDeleted}
           onCursorMove={handleCursorMove}
           onViewportCenterChange={(fn) => setGetViewportCenter(() => fn)}
@@ -238,6 +240,8 @@ export function Room({ roomId }: RoomProps) {
           users={onlineUsers}
           currentUserId={user.uid}
           remoteCursors={remoteCursors}
+          presenceConnected={presenceConnected}
+          debugError={presenceDebugError}
         />
       </div>
 

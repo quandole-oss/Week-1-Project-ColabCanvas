@@ -77,7 +77,7 @@ service cloud.firestore {
         // Any room member can update objects (collaborative editing)
         allow update: if isRoomMember(roomId) &&
           (!('type' in request.resource.data) ||
-           request.resource.data.type in ['rect', 'circle', 'line', 'triangle', 'star', 'hexagon', 'sticky']);
+           request.resource.data.type in ['rect', 'circle', 'line', 'triangle', 'star', 'hexagon', 'sticky', 'textbox']);
 
         // Any room member can delete objects (collaborative editing)
         allow delete: if isRoomMember(roomId);
