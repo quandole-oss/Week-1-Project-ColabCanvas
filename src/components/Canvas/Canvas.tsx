@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useState, useCallback, type ReactNode } from 'react';
 import { Rect, Circle, Line, Polygon, Triangle, Textbox, FabricObject } from 'fabric';
 import type { TPointerEventInfo, TPointerEvent } from 'fabric';
 import { v4 as uuidv4 } from 'uuid';
@@ -69,6 +69,7 @@ export function Canvas({
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [, setViewportVersion] = useState(0);
+  const [contextMenuPos, setContextMenuPos] = useState<{ left: number; top: number } | null>(null);
   // Store object state before modification for undo
   const objectStateBeforeModifyRef = useRef<Map<string, CanvasObjectProps>>(new Map());
 
@@ -110,6 +111,12 @@ export function Canvas({
   const prevFontFamilyRef = useRef(fontFamily);
   const prevTextColorRef = useRef(textColor);
   const [isStickySelected, setIsStickySelected] = useState(false);
+  const [isTextboxSelected, setIsTextboxSelected] = useState(false);
+
+  // Track color drag for batching undo: capture props before the first change,
+  // then commit a single history entry when changes stop.
+  const colorDragStartRef = useRef<{ objectId: string; props: CanvasObjectProps } | null>(null);
+  const colorHistoryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Add to history (defined early so effects can use it)
   const addToHistory = useCallback((entry: HistoryEntry) => {
@@ -136,7 +143,7 @@ export function Canvas({
 
   // Change cursor and selection based on tool
   const isDrawingTool = tool === 'rect' || tool === 'circle' || tool === 'triangle' ||
-    tool === 'hexagon' || tool === 'star' || tool === 'line' || tool === 'sticky';
+    tool === 'hexagon' || tool === 'star' || tool === 'line' || tool === 'sticky' || tool === 'textbox';
 
   useEffect(() => {
     const canvas = fabricRef.current;
@@ -206,14 +213,16 @@ export function Canvas({
     // Check if the object's color is already the same (e.g., when selecting an object)
     const currentFill = activeObject.fill as string;
     const currentStroke = activeObject.stroke as string;
-    const fillActuallyChanging = fillChanged && !(activeObject instanceof Line) && currentFill !== fillColor;
-    const strokeActuallyChanging = strokeChanged && currentStroke !== strokeColor;
+    const fillActuallyChanging = fillChanged && !(activeObject instanceof Line) && !(activeObject instanceof Textbox) && currentFill !== fillColor;
+    const strokeActuallyChanging = strokeChanged && !(activeObject instanceof Textbox) && currentStroke !== strokeColor;
 
     // Don't do anything if the object already has these colors
     if (!fillActuallyChanging && !strokeActuallyChanging) return;
 
-    // Capture previous props for undo (before changing the object)
-    const previousProps = getObjectProps(activeObject);
+    // Capture "before" props on the first change of a drag sequence
+    if (!colorDragStartRef.current || colorDragStartRef.current.objectId !== id) {
+      colorDragStartRef.current = { objectId: id, props: getObjectProps(activeObject) };
+    }
 
     // Update fill color (not for lines) only if fill changed
     if (fillActuallyChanging) {
@@ -229,14 +238,20 @@ export function Canvas({
     const newProps = getObjectProps(activeObject);
     onObjectModified?.(id, newProps);
 
-    // Add to history for undo
-    addToHistory({
-      type: 'modify',
-      objectId: id,
-      objectType: getObjectType(activeObject),
-      props: newProps,
-      previousProps,
-    });
+    // Debounce: commit a single history entry when changes settle
+    if (colorHistoryTimerRef.current) clearTimeout(colorHistoryTimerRef.current);
+    colorHistoryTimerRef.current = setTimeout(() => {
+      if (colorDragStartRef.current) {
+        addToHistory({
+          type: 'modify',
+          objectId: colorDragStartRef.current.objectId,
+          objectType: getObjectType(activeObject),
+          props: getObjectProps(activeObject),
+          previousProps: colorDragStartRef.current.props,
+        });
+        colorDragStartRef.current = null;
+      }
+    }, 300);
   }, [fabricRef, fillColor, strokeColor, onObjectModified, addToHistory]);
 
   // Undo last action
@@ -504,6 +519,30 @@ export function Canvas({
     setCanRedo(redoHistoryRef.current.length > 0);
   }, [fabricRef, onObjectDeleted, onObjectCreated, onObjectModified]);
 
+  // Delete selected objects (used by floating context menu and keyboard shortcut)
+  const handleDeleteSelected = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+    activeObjects.forEach((obj) => {
+      const id = (obj as FabricObject & { id?: string }).id;
+      if (id) {
+        addToHistory({
+          type: 'delete',
+          objectId: id,
+          objectType: getObjectType(obj),
+          props: getObjectProps(obj),
+          zIndex: objectCountRef.current,
+        });
+        onObjectDeleted?.(id);
+      }
+      canvas.remove(obj);
+    });
+    canvas.discardActiveObject();
+    canvas.renderAll();
+    setContextMenuPos(null);
+  }, [fabricRef, addToHistory, onObjectDeleted]);
+
   // Keyboard shortcuts: undo (Ctrl+Z), redo (Ctrl+Shift+Z/Ctrl+Y), and delete (Delete/Backspace)
   useEffect(() => {
     const canvas = fabricRef.current;
@@ -716,13 +755,21 @@ export function Canvas({
     const updateStickySelection = () => {
       const active = canvas.getActiveObject();
       if (active instanceof Textbox && (active as FabricObject & { id?: string }).id) {
-        setIsStickySelected(true);
-        // Load the sticky's current font values into toolbar
+        const customType = (active as FabricObject & { customType?: string }).customType;
+        if (customType === 'textbox') {
+          setIsStickySelected(false);
+          setIsTextboxSelected(true);
+        } else {
+          setIsStickySelected(true);
+          setIsTextboxSelected(false);
+        }
+        // Load the text element's current font values into toolbar
         if (active.fontSize) setFontSize(active.fontSize);
         if (active.fontFamily) setFontFamily(active.fontFamily);
         if (active.fill) setTextColor(active.fill as string);
       } else {
         setIsStickySelected(false);
+        setIsTextboxSelected(false);
       }
     };
 
@@ -758,8 +805,10 @@ export function Canvas({
     const id = (activeObject as FabricObject & { id?: string }).id;
     if (!id) return;
 
-    // Capture previous props for undo
-    const previousProps = getObjectProps(activeObject);
+    // Capture "before" props on the first change of a drag sequence
+    if (!colorDragStartRef.current || colorDragStartRef.current.objectId !== id) {
+      colorDragStartRef.current = { objectId: id, props: getObjectProps(activeObject) };
+    }
 
     if (fontSizeChanged) activeObject.set('fontSize', fontSize);
     if (fontFamilyChanged) activeObject.set('fontFamily', fontFamily);
@@ -769,13 +818,20 @@ export function Canvas({
     const newProps = getObjectProps(activeObject);
     onObjectModified?.(id, newProps);
 
-    addToHistory({
-      type: 'modify',
-      objectId: id,
-      objectType: 'sticky',
-      props: newProps,
-      previousProps,
-    });
+    // Debounce: commit a single history entry when changes settle
+    if (colorHistoryTimerRef.current) clearTimeout(colorHistoryTimerRef.current);
+    colorHistoryTimerRef.current = setTimeout(() => {
+      if (colorDragStartRef.current) {
+        addToHistory({
+          type: 'modify',
+          objectId: colorDragStartRef.current.objectId,
+          objectType: getObjectType(activeObject),
+          props: getObjectProps(activeObject),
+          previousProps: colorDragStartRef.current.props,
+        });
+        colorDragStartRef.current = null;
+      }
+    }, 300);
   }, [fabricRef, fontSize, fontFamily, textColor, onObjectModified, addToHistory]);
 
   // Track viewport changes to update selection overlays
@@ -793,6 +849,49 @@ export function Canvas({
     return () => {
       canvas.off('mouse:wheel', updateViewport);
       canvas.off('mouse:up', updateViewport);
+    };
+  }, [fabricRef]);
+
+  // Track floating context menu position for selected objects
+  useEffect(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+
+    const updatePos = () => {
+      const activeObj = canvas.getActiveObject();
+      if (!activeObj || !(activeObj as FabricObject & { id?: string }).id) {
+        setContextMenuPos(null);
+        return;
+      }
+      const bounds = activeObj.getBoundingRect();
+      setContextMenuPos({
+        left: bounds.left + bounds.width + 8,
+        top: bounds.top,
+      });
+    };
+
+    const hideMenu = () => setContextMenuPos(null);
+
+    canvas.on('selection:created', updatePos);
+    canvas.on('selection:updated', updatePos);
+    canvas.on('selection:cleared', hideMenu);
+    canvas.on('object:moving', hideMenu);
+    canvas.on('object:scaling', hideMenu);
+    canvas.on('object:rotating', updatePos);
+    canvas.on('object:modified', updatePos);
+    canvas.on('mouse:up', updatePos);
+    canvas.on('mouse:wheel', updatePos);
+
+    return () => {
+      canvas.off('selection:created', updatePos);
+      canvas.off('selection:updated', updatePos);
+      canvas.off('selection:cleared', hideMenu);
+      canvas.off('object:moving', hideMenu);
+      canvas.off('object:scaling', hideMenu);
+      canvas.off('object:rotating', updatePos);
+      canvas.off('object:modified', updatePos);
+      canvas.off('mouse:up', updatePos);
+      canvas.off('mouse:wheel', updatePos);
     };
   }, [fabricRef]);
 
@@ -926,10 +1025,28 @@ export function Canvas({
             padding: 12,
             editable: true,
           });
-          // Override auto-computed height to make it square initially
-          tb.height = 200;
-          tb.setCoords();
+          (tb as FabricObject & { customType?: string }).customType = 'sticky';
+          (tb as any)._stickyHeight = 200;
+          applyStickyHeightOverride(tb);
           shape = tb;
+          break;
+        }
+        case 'textbox': {
+          const textbox = new Textbox('', {
+            left: pointer.x,
+            top: pointer.y,
+            width: 200,
+            minWidth: 50,
+            fill: textColor,
+            backgroundColor: 'transparent',
+            strokeWidth: 0,
+            fontSize,
+            fontFamily,
+            padding: 8,
+            editable: true,
+          });
+          (textbox as FabricObject & { customType?: string }).customType = 'textbox';
+          shape = textbox;
           break;
         }
       }
@@ -1080,6 +1197,7 @@ export function Canvas({
           break;
         }
         case 'sticky':
+        case 'textbox':
           // No-op: click-to-place, not drag-to-size
           break;
       }
@@ -1136,7 +1254,7 @@ export function Canvas({
           Math.pow((line.y2 ?? 0) - (line.y1 ?? 0), 2)
         );
         isValidShape = length > minSize;
-      } else if (tool === 'sticky') {
+      } else if (tool === 'sticky' || tool === 'textbox') {
         isValidShape = true; // Fixed size, always valid
       }
 
@@ -1465,9 +1583,62 @@ export function Canvas({
     canvas.renderAll();
   }, [fabricRef, remoteSelections, localSelectedId]);
 
+  // Compute floating context menu for selected object
+  let floatingMenu: ReactNode = null;
+  if (contextMenuPos) {
+    const activeObj = fabricRef.current?.getActiveObject();
+    const activeObjId = activeObj ? (activeObj as FabricObject & { id?: string }).id : null;
+    if (activeObj && activeObjId) {
+      const isTextElement = activeObj instanceof Textbox;
+      const isLineElement = activeObj instanceof Line;
+      const currentFill = (activeObj.fill as string) || '#4F46E5';
+      const currentStroke = (activeObj.stroke as string) || '#3b82f6';
+
+      floatingMenu = (
+        <div
+          className="absolute z-30 flex flex-col gap-1.5 p-1.5 bg-white/90 backdrop-blur-sm rounded-lg shadow-lg border border-white/30 pointer-events-none"
+          style={{ left: contextMenuPos.left, top: contextMenuPos.top }}
+        >
+          {isTextElement ? (
+            <label className="relative w-8 h-8 block cursor-pointer pointer-events-auto" title="Text color">
+              <div className="w-8 h-8 rounded-full border-2 border-white shadow-md" style={{ backgroundColor: currentFill }} />
+              <input type="color" value={currentFill} onChange={(e) => setTextColor(e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+            </label>
+          ) : !isLineElement ? (
+            <label className="relative w-8 h-8 block cursor-pointer pointer-events-auto" title="Fill color">
+              <div className="w-8 h-8 rounded-full border-2 border-white shadow-md" style={{ backgroundColor: currentFill }} />
+              <input type="color" value={currentFill} onChange={(e) => setFillColor(e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+            </label>
+          ) : null}
+
+          {!isTextElement && (
+            <label className="relative w-8 h-8 block cursor-pointer pointer-events-auto" title="Border color">
+              <div className="w-8 h-8 rounded-full border-2 border-white shadow-md" style={{ backgroundColor: currentStroke }} />
+              <input type="color" value={currentStroke} onChange={(e) => setStrokeColor(e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+            </label>
+          )}
+
+          <button
+            className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-md transition pointer-events-auto"
+            title="Delete"
+            onClick={handleDeleteSelected}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+          </button>
+        </div>
+      );
+    }
+  }
+
   return (
     <div className="relative w-full h-full overflow-hidden">
       <canvas ref={canvasElRef} />
+
+      {/* Floating context menu for selected object */}
+      {floatingMenu}
 
       {/* Remote selection name badges - positioned above selected objects */}
       {Array.from(remoteSelections.entries()).map(([odId, selection]) => {
@@ -1557,10 +1728,6 @@ export function Canvas({
       <CanvasToolbar
         tool={tool}
         setTool={setTool}
-        fillColor={fillColor}
-        setFillColor={setFillColor}
-        strokeColor={strokeColor}
-        setStrokeColor={setStrokeColor}
         fontSize={fontSize}
         setFontSize={setFontSize}
         fontFamily={fontFamily}
@@ -1568,6 +1735,7 @@ export function Canvas({
         textColor={textColor}
         setTextColor={setTextColor}
         isStickySelected={isStickySelected}
+        isTextboxSelected={isTextboxSelected}
         zoomLevel={zoomLevel}
         onZoomIn={zoomIn}
         onZoomOut={zoomOut}
@@ -1614,6 +1782,26 @@ function createStarPoints(size: number): { x: number; y: number }[] {
     });
   }
   return points;
+}
+
+// Apply sticky note height enforcement by overriding Fabric's initDimensions.
+// Fabric.js Textbox auto-recalculates height based on text content whenever
+// text changes, properties update, or the object re-renders. This override
+// ensures the sticky never shrinks below its intended height.
+function applyStickyHeightOverride(tb: Textbox) {
+  const original = tb.initDimensions.bind(tb);
+  tb.initDimensions = function () {
+    original();
+    // Don't fight Fabric during active scaling (user is resizing)
+    if ((this.scaleX ?? 1) !== 1 || (this.scaleY ?? 1) !== 1) return;
+    const minH = (this as any)._stickyHeight ?? 200;
+    if (this.height < minH) {
+      this.height = minH;
+    }
+  };
+  (tb as any)._stickyHeightOverrideApplied = true;
+  // Run it once to enforce immediately
+  tb.initDimensions();
 }
 
 // Helper to create Fabric object from CanvasObject
@@ -1728,13 +1916,32 @@ function createFabricObject(obj: CanvasObject): FabricObject | null {
         originX: 'left',
         originY: 'top',
       });
-      // Enforce minimum height for square appearance
-      const minH = props.height ?? 200;
-      if (stickyTb.height < minH) {
-        stickyTb.height = minH;
-        stickyTb.setCoords();
-      }
+      (stickyTb as FabricObject & { customType?: string }).customType = 'sticky';
+      (stickyTb as any)._stickyHeight = props.height ?? 200;
+      applyStickyHeightOverride(stickyTb);
       return stickyTb;
+    }
+    case 'textbox': {
+      const textboxObj = new Textbox(props.text ?? '', {
+        left: props.left,
+        top: props.top,
+        width: props.width ?? 200,
+        minWidth: 50,
+        fill: props.textColor || '#000000',
+        backgroundColor: props.fill || 'transparent',
+        strokeWidth: 0,
+        fontSize: props.fontSize ?? 16,
+        fontFamily: props.fontFamily ?? 'sans-serif',
+        padding: 8,
+        editable: true,
+        angle: props.angle ?? 0,
+        scaleX: props.scaleX ?? 1,
+        scaleY: props.scaleY ?? 1,
+        originX: 'left',
+        originY: 'top',
+      });
+      (textboxObj as FabricObject & { customType?: string }).customType = 'textbox';
+      return textboxObj;
     }
     default:
       return null;
@@ -1774,7 +1981,7 @@ function updateFabricObject(fabricObj: FabricObject, obj: CanvasObject) {
   });
 
   // Update fill/stroke for shapes that have them
-  if (obj.type !== 'line' && obj.type !== 'sticky') {
+  if (obj.type !== 'line' && obj.type !== 'sticky' && obj.type !== 'textbox') {
     fabricObj.set({
       fill: props.fill,
     });
@@ -1805,7 +2012,7 @@ function updateFabricObject(fabricObj: FabricObject, obj: CanvasObject) {
       };
     }
   }
-  // Sticky notes: no stroke (it outlines text characters in Fabric.js)
+  // Sticky notes & textboxes: no stroke (it outlines text characters in Fabric.js)
 
   if (obj.type === 'rect') {
     (fabricObj as Rect).set({
@@ -1836,12 +2043,38 @@ function updateFabricObject(fabricObj: FabricObject, obj: CanvasObject) {
       fill: props.textColor || '#000000',
       backgroundColor: props.fill || '#FEF3C7',
     });
-    // Enforce minimum height for square appearance
-    const minH = props.height ?? 200;
-    if (tb.height < minH) tb.height = minH;
+    (tb as FabricObject & { customType?: string }).customType = 'sticky';
+    // Update stored height from synced data
+    const stickyH = props.height ?? 200;
+    (tb as any)._stickyHeight = stickyH;
+    // Re-apply override if not already applied (e.g. object created before fix)
+    if (!(tb as any)._stickyHeightOverrideApplied) {
+      applyStickyHeightOverride(tb);
+      (tb as any)._stickyHeightOverrideApplied = true;
+    }
+    tb.height = stickyH;
     // Only update text if changed (prevents interrupting active editing)
     if (props.text !== undefined && tb.text !== props.text) {
-      tb.set({ text: props.text });
+      if (!(tb as any).isEditing) {
+        tb.set({ text: props.text });
+      }
+    }
+  }
+
+  if (obj.type === 'textbox') {
+    const tb = fabricObj as Textbox;
+    tb.set({
+      width: props.width,
+      fontSize: props.fontSize,
+      fontFamily: props.fontFamily,
+      fill: props.textColor || '#000000',
+      backgroundColor: props.fill || 'transparent',
+    });
+    (tb as FabricObject & { customType?: string }).customType = 'textbox';
+    if (props.text !== undefined && tb.text !== props.text) {
+      if (!(tb as any).isEditing) {
+        tb.set({ text: props.text });
+      }
     }
   }
 
@@ -1850,7 +2083,10 @@ function updateFabricObject(fabricObj: FabricObject, obj: CanvasObject) {
 
 // Helper to get object type from Fabric object
 function getObjectType(obj: FabricObject): ShapeType {
-  if (obj instanceof Textbox) return 'sticky';
+  if (obj instanceof Textbox) {
+    const customType = (obj as FabricObject & { customType?: string }).customType;
+    return customType === 'textbox' ? 'textbox' : 'sticky';
+  }
   if (obj instanceof Rect) return 'rect';
   if (obj instanceof Circle) return 'circle';
   if (obj instanceof Triangle) return 'triangle';
@@ -1918,8 +2154,9 @@ function getObjectProps(obj: FabricObject): CanvasObjectProps {
   }
 
   if (obj instanceof Textbox) {
+    const customType = (obj as FabricObject & { customType?: string }).customType;
     props.width = obj.width;
-    props.height = obj.height;
+    props.height = (customType === 'sticky') ? ((obj as any)._stickyHeight ?? 200) : obj.height;
     props.text = obj.text || '';
     props.fontSize = obj.fontSize;
     props.fontFamily = obj.fontFamily;

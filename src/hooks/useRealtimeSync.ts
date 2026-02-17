@@ -120,6 +120,7 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
           // On add
           (obj) => {
             setObjects((prev) => {
+              if (prev.has(obj.id)) return prev; // Skip own echo
               const next = new Map(prev);
               next.set(obj.id, obj);
               return next;
@@ -235,12 +236,16 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
       // Sync to Firebase if configured, or broadcast in demo mode
       if (isFirebaseConfigured) {
         localPendingUpdates.current.add(id);
+        // Merge with existing props so Firestore keeps all fields
+        // (setDoc merge:true replaces the entire props object, so partial
+        // updates like move-only would delete text/fontSize/etc.)
+        const mergedProps = { ...existingObj.props, ...props };
         try {
           await syncObject(
             roomId,
             id,
             existingObj.type,
-            props,
+            mergedProps,
             existingObj.zIndex,
             odId,
             false

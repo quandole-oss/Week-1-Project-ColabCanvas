@@ -201,7 +201,19 @@ export function useCanvas(
 
         // Flatten scale into actual dimensions for consistent sync
         const actualWidth = Math.round((obj.width ?? 0) * (obj.scaleX ?? 1));
-        const actualHeight = Math.round((obj.height ?? 0) * (obj.scaleY ?? 1));
+        let actualHeight = Math.round((obj.height ?? 0) * (obj.scaleY ?? 1));
+        // For sticky notes, use stored height (Fabric auto-recalculates Textbox height)
+        if (obj instanceof Textbox) {
+          const customType = (obj as FabricObject & { customType?: string }).customType;
+          if (customType === 'sticky') {
+            const storedH = (obj as any)._stickyHeight ?? 200;
+            const wasResized = (obj.scaleY ?? 1) !== 1;
+            actualHeight = wasResized
+              ? Math.round(storedH * (obj.scaleY ?? 1))
+              : storedH;
+            (obj as any)._stickyHeight = actualHeight;
+          }
+        }
         const rawRadius = (obj as unknown as { radius?: number }).radius;
         const actualRadius = rawRadius !== undefined
           ? Math.round(rawRadius * (obj.scaleX ?? 1))
@@ -272,7 +284,8 @@ export function useCanvas(
           left: Math.round(topLeft.left),
           top: Math.round(topLeft.top),
           width: obj.width,
-          height: obj.height,
+          height: (isSticky && (obj as FabricObject & { customType?: string }).customType === 'sticky')
+            ? ((obj as any)._stickyHeight ?? 200) : obj.height,
           ...(radius !== undefined ? { radius } : {}),
           fill: isSticky ? (obj as Textbox).backgroundColor as string : obj.fill as string,
           stroke: obj.stroke as string,
@@ -303,7 +316,8 @@ export function useCanvas(
           left: Math.round(topLeft.left),
           top: Math.round(topLeft.top),
           width: obj.width,
-          height: obj.height,
+          height: (isSticky && (obj as FabricObject & { customType?: string }).customType === 'sticky')
+            ? ((obj as any)._stickyHeight ?? 200) : obj.height,
           ...(radius !== undefined ? { radius } : {}),
           fill: isSticky ? (obj as Textbox).backgroundColor as string : obj.fill as string,
           stroke: obj.stroke as string,
