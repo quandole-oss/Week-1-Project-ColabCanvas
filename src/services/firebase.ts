@@ -6,6 +6,7 @@ import { getFirestore } from 'firebase/firestore';
 import type { Firestore } from 'firebase/firestore';
 import { getDatabase } from 'firebase/database';
 import type { Database } from 'firebase/database';
+import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'firebase/app-check';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -38,6 +39,15 @@ if (isFirebaseConfigured) {
     db = getFirestore(app);
     rtdb = getDatabase(app);
     googleProvider = new GoogleAuthProvider();
+
+    // Initialize App Check if reCAPTCHA site key is configured
+    const recaptchaSiteKey = import.meta.env.VITE_RECAPTCHA_SITE_KEY;
+    if (recaptchaSiteKey && recaptchaSiteKey !== 'undefined') {
+      initializeAppCheck(app, {
+        provider: new ReCaptchaEnterpriseProvider(recaptchaSiteKey),
+        isTokenAutoRefreshEnabled: true,
+      });
+    }
   } catch (error) {
     console.warn('Firebase initialization failed:', error);
   }

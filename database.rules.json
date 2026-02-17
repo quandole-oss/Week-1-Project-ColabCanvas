@@ -1,11 +1,20 @@
 {
   "rules": {
+    ".read": false,
+    ".write": false,
     "cursors": {
       "$roomId": {
         ".read": "auth != null",
         "$userId": {
           ".read": "auth != null",
-          ".write": "auth != null && auth.uid == $userId"
+          ".write": "auth != null && auth.uid == $userId",
+          ".validate": "newData.hasChildren(['x', 'y', 'userId', 'userName', 'color', 'lastActive'])",
+          "x": { ".validate": "newData.isNumber()" },
+          "y": { ".validate": "newData.isNumber()" },
+          "userId": { ".validate": "newData.isString() && newData.val().length > 0" },
+          "userName": { ".validate": "newData.isString()" },
+          "color": { ".validate": "newData.isString()" },
+          "lastActive": { ".validate": "newData.isNumber()" }
         }
       }
     },
@@ -14,7 +23,10 @@
         ".read": "auth != null",
         "$userId": {
           ".read": "auth != null",
-          ".write": "auth != null && auth.uid == $userId"
+          ".write": "auth != null && auth.uid == $userId",
+          ".validate": "newData.hasChildren(['online', 'lastSeen'])",
+          "online": { ".validate": "newData.isBoolean()" },
+          "lastSeen": { ".validate": "newData.isNumber()" }
         }
       }
     }

@@ -12,7 +12,7 @@ export function Home() {
   if (!user) return null;
 
   const handleCreateRoom = () => {
-    const newRoomId = uuidv4().slice(0, 8);
+    const newRoomId = uuidv4().replace(/-/g, '').slice(0, 16);
     navigate(`/room/${newRoomId}`);
   };
 

@@ -262,11 +262,29 @@ export function parseFunctionCalls(functionCalls: Array<{
   name: string;
   arguments: string;
 }>): AIAction[] {
-  return functionCalls.map((call) => ({
-    type: call.name,
-    params: JSON.parse(call.arguments),
-  }));
+  return functionCalls
+    .map((call) => {
+      try {
+        return {
+          type: call.name,
+          params: JSON.parse(call.arguments),
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter((action): action is AIAction => action !== null);
 }
+
+const VALID_ACTION_TYPES = new Set([
+  'createShape', 'moveObject', 'resizeObject', 'rotateObject',
+  'deleteObject', 'arrangeObjects', 'createLoginForm',
+  'createNavigationBar', 'getCanvasState',
+]);
+
+const VALID_SHAPE_TYPES = new Set([
+  'rect', 'circle', 'line', 'triangle', 'hexagon', 'star', 'sticky',
+]);
 
 // Execute AI actions on the canvas
 export function executeAIAction(
@@ -277,11 +295,14 @@ export function executeAIAction(
   deleteObject: (id: string) => void
 ): { success: boolean; message: string; createdIds?: string[] } {
   const { type, params } = action;
-  console.log('[AI] Executing action:', type, params);
+
+  if (!VALID_ACTION_TYPES.has(type)) {
+    return { success: false, message: `Unknown action type: ${type}` };
+  }
 
   switch (type) {
     case 'createShape': {
-      const { type: shapeType, x, y, width, height, radius, color, text } = params as {
+      const { type: shapeType, x: rawX, y: rawY, width, height, radius, color, text } = params as {
         type: ShapeType;
         x: number;
         y: number;
@@ -291,6 +312,16 @@ export function executeAIAction(
         color?: string;
         text?: string;
       };
+
+      if (typeof shapeType !== 'string' || !VALID_SHAPE_TYPES.has(shapeType)) {
+        return { success: false, message: `Invalid shape type: ${shapeType}` };
+      }
+
+      const x = Number(rawX);
+      const y = Number(rawY);
+      if (isNaN(x) || isNaN(y)) {
+        return { success: false, message: 'Invalid coordinates: x and y must be numbers' };
+      }
 
       const isSticky = shapeType === 'sticky';
       const props: CanvasObjectProps = {
