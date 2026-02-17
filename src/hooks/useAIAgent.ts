@@ -374,6 +374,19 @@ function processLocalCommand(
     return `Deleted ${objectIds.length} objects`;
   }
 
+  // Parse textbox creation (check before sticky and general shape patterns)
+  if (lowerCommand.includes('textbox') || lowerCommand.includes('text box') || lowerCommand.includes('text field')) {
+    const pos = parsePosition(command, viewportCenter);
+    const textMatch = command.match(/(?:saying|with text|text|:)\s*['"]([^'"]+)['"]/i);
+    const text = textMatch ? textMatch[1] : '';
+    const action: AIAction = {
+      type: 'createShape',
+      params: { type: 'textbox', x: pos.x, y: pos.y, text },
+    };
+    const result = executeAIAction(action, canvasObjects, createObject, updateObject, deleteObject);
+    return result.message;
+  }
+
   // Parse sticky note creation (check before general shape patterns)
   if (lowerCommand.includes('sticky') || lowerCommand.includes('note')) {
     const pos = parsePosition(command, viewportCenter);
@@ -457,6 +470,7 @@ function processLocalCommand(
 • "Make 3 green triangles"
 • "Create a yellow star" or "purple hexagon"
 • "Create a sticky note" or "Create a note saying 'Hello'"
+• "Create a textbox" or "Create a text box saying 'Hello'"
 • "Create a 3x3 grid"
 • "Create a large circle at center"
 • "Create a small blue rectangle at top left"

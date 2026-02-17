@@ -1,6 +1,6 @@
 import { Timestamp } from 'firebase/firestore';
 
-export type ShapeType = 'rect' | 'circle' | 'line' | 'triangle' | 'star' | 'hexagon' | 'sticky';
+export type ShapeType = 'rect' | 'circle' | 'line' | 'triangle' | 'star' | 'hexagon' | 'sticky' | 'textbox';
 
 export interface CanvasObjectProps {
   left: number;
@@ -56,4 +56,4 @@ export interface Room {
   isPublic?: boolean; // Optional: if true, any authenticated user can join
 }
 
-export type Tool = 'select' | 'rect' | 'circle' | 'line' | 'triangle' | 'star' | 'hexagon' | 'sticky' | 'pan' | 'eraser';
+export type Tool = 'select' | 'rect' | 'circle' | 'line' | 'triangle' | 'star' | 'hexagon' | 'sticky' | 'textbox' | 'pan' | 'eraser';

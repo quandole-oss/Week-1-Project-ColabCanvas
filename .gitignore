@@ -17,9 +17,14 @@ functions/lib
 # Environment files (contain secrets)
 .env
 .env.local
+.env.local.bak
+.env.local.disabled
 .env.*.local
 .env.development
 .env.production
+
+# Internal reference docs
+FIREBASE_SETUP.md
 
 # Editor directories and files
 .vscode/*

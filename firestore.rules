@@ -72,7 +72,7 @@ service cloud.firestore {
         // Room members can create objects with validated schema
         allow create: if isRoomMember(roomId) &&
           request.resource.data.keys().hasAll(['id', 'type', 'props', 'zIndex']) &&
-          request.resource.data.type in ['rect', 'circle', 'line', 'triangle', 'star', 'hexagon', 'sticky'];
+          request.resource.data.type in ['rect', 'circle', 'line', 'triangle', 'star', 'hexagon', 'sticky', 'textbox'];
 
         // Any room member can update objects (collaborative editing)
         allow update: if isRoomMember(roomId) &&

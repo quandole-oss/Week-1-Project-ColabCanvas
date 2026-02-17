@@ -12,7 +12,7 @@ export const AI_TOOLS = [
         properties: {
           type: {
             type: 'string',
-            enum: ['rect', 'circle', 'line', 'triangle', 'hexagon', 'star', 'sticky'],
+            enum: ['rect', 'circle', 'line', 'triangle', 'hexagon', 'star', 'sticky', 'textbox'],
             description: 'The type of shape to create',
           },
           x: {
@@ -283,7 +283,7 @@ const VALID_ACTION_TYPES = new Set([
 ]);
 
 const VALID_SHAPE_TYPES = new Set([
-  'rect', 'circle', 'line', 'triangle', 'hexagon', 'star', 'sticky',
+  'rect', 'circle', 'line', 'triangle', 'hexagon', 'star', 'sticky', 'textbox',
 ]);
 
 // Execute AI actions on the canvas
@@ -324,16 +324,18 @@ export function executeAIAction(
       }
 
       const isSticky = shapeType === 'sticky';
+      const isTextbox = shapeType === 'textbox';
+      const isTextElement = isSticky || isTextbox;
       const props: CanvasObjectProps = {
         left: x,
         top: y,
-        width: isSticky ? (width ?? 200) : (width ?? 100),
-        height: isSticky ? (height ?? 200) : (height ?? 100),
+        width: isTextElement ? (width ?? 200) : (width ?? 100),
+        height: isSticky ? (height ?? 200) : isTextbox ? (height ?? 40) : (height ?? 100),
         radius: radius ?? 50,
-        fill: isSticky ? (color ?? '#FEF3C7') : (color ?? '#3B82F6'),
-        stroke: isSticky ? undefined : '#1E40AF',
-        strokeWidth: isSticky ? 0 : 2,
-        ...(isSticky ? { text: text ?? '', fontSize: 16, fontFamily: 'Times New Roman', textColor: '#000000' } : {}),
+        fill: isSticky ? (color ?? '#FEF3C7') : isTextbox ? '' : (color ?? '#3B82F6'),
+        stroke: isTextElement ? undefined : '#1E40AF',
+        strokeWidth: isTextElement ? 0 : 2,
+        ...(isTextElement ? { text: text ?? '', fontSize: 16, fontFamily: 'sans-serif', textColor: isTextbox ? (color ?? '#000000') : '#000000' } : {}),
       };
 
       console.log('[AI] Creating shape with props:', props);
@@ -557,6 +559,7 @@ export const AI_SYSTEM_PROMPT = `You are an AI assistant that helps users create
 You can:
 - Create shapes (rectangles, circles, lines, triangles, hexagons, stars) with custom colors, sizes, and positions
 - Create sticky notes with editable text
+- Create text boxes for free-form text on the canvas
 - Move, resize, and rotate existing objects
 - Delete objects
 - Arrange objects in layouts (rows, columns, grids)

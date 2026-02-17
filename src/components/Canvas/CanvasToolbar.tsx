@@ -4,10 +4,6 @@ import type { Tool } from '../../types';
 interface CanvasToolbarProps {
   tool: Tool;
   setTool: (tool: Tool) => void;
-  fillColor: string;
-  setFillColor: (color: string) => void;
-  strokeColor: string;
-  setStrokeColor: (color: string) => void;
   fontSize: number;
   setFontSize: (size: number) => void;
   fontFamily: string;
@@ -15,6 +11,7 @@ interface CanvasToolbarProps {
   textColor: string;
   setTextColor: (color: string) => void;
   isStickySelected: boolean;
+  isTextboxSelected: boolean;
   zoomLevel: number;
   onZoomIn: () => void;
   onZoomOut: () => void;
@@ -59,10 +56,6 @@ const FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64];
 export function CanvasToolbar({
   tool,
   setTool,
-  fillColor,
-  setFillColor,
-  strokeColor,
-  setStrokeColor,
   fontSize,
   setFontSize,
   fontFamily,
@@ -70,6 +63,7 @@ export function CanvasToolbar({
   textColor,
   setTextColor,
   isStickySelected,
+  isTextboxSelected,
   zoomLevel,
   onZoomIn,
   onZoomOut,
@@ -105,8 +99,8 @@ export function CanvasToolbar({
     setShapesOpen(false);
   };
 
-  // Show font controls when sticky tool is active or a sticky note is selected
-  const showFontControls = tool === 'sticky' || isStickySelected;
+  // Show font controls when sticky/textbox tool is active or a text element is selected
+  const showFontControls = tool === 'sticky' || tool === 'textbox' || isStickySelected || isTextboxSelected;
 
   return (
     <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-2 z-50">
@@ -177,6 +171,19 @@ export function CanvasToolbar({
           🗒
         </button>
 
+        {/* Textbox - standalone button */}
+        <button
+          onClick={() => setTool('textbox')}
+          className={`w-8 h-8 rounded-md flex items-center justify-center text-base font-bold transition ${
+            tool === 'textbox'
+              ? 'bg-blue-500 text-white shadow-md'
+              : 'bg-white/50 text-gray-700 hover:bg-white/80'
+          }`}
+          title="Text Box"
+        >
+          T
+        </button>
+
         {/* Other tools */}
         {otherTools.map((t) => (
           <button
@@ -192,33 +199,6 @@ export function CanvasToolbar({
             {t.icon}
           </button>
         ))}
-      </div>
-
-      {/* Divider */}
-      <div className="w-px h-6 bg-gray-300" />
-
-      {/* Color pickers */}
-      <div className="bg-white/50 backdrop-blur-sm rounded-lg p-1.5 shadow-lg border border-white/20 flex items-center gap-2">
-        <div className="flex items-center gap-1">
-          <input
-            type="color"
-            value={fillColor}
-            onChange={(e) => setFillColor(e.target.value)}
-            className="w-6 h-6 rounded cursor-pointer border border-gray-300 shadow-sm"
-            title="Fill color"
-          />
-          <span className="text-[10px] text-gray-500 font-medium">Fill</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <input
-            type="color"
-            value={strokeColor}
-            onChange={(e) => setStrokeColor(e.target.value)}
-            className="w-6 h-6 rounded cursor-pointer border border-gray-300 shadow-sm"
-            title="Outline color"
-          />
-          <span className="text-[10px] text-gray-500 font-medium">Outline</span>
-        </div>
       </div>
 
       {/* Font controls - visible when sticky tool active or sticky selected */}
