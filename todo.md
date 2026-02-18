@@ -588,3 +588,246 @@ Call this callback from Room.tsx when AI operations occur.
 - **Reconnection resilience**: The `.info/connected` listener fires every time the RTDB connection is (re)established. Each time, it re-runs `setUserOnline()` which registers a fresh `onDisconnect` handler and writes `online: true`. Works across network drops, tab sleep/wake, and mobile backgrounding.
 - **Visual debug**: A small debug indicator in the OnlineUsers panel shows RTDB connection state and truncated user ID, making it easy to verify presence is working without opening DevTools.
 - TypeScript compiles clean, Vite build succeeds, deployed to Firebase Hosting.
+
+---
+
+## Phase 12: Presence Heartbeat & Ghost User Cleanup
+
+### 12.1 Heartbeat & Stale User Filtering
+- [x] Implement 3-second heartbeat updating `lastSeen` in Realtime DB
+- [x] Filter out users with `lastSeen` older than 8 seconds (ghost user cleanup)
+- [x] Remove blocking CSP header that was preventing RTDB WebSocket connection
+- [x] Clean up verbose debug logging from presence system
+
+### Files modified
+1. `firebase.json` — removed CSP header blocking RTDB WebSocket
+2. `src/services/presenceSync.ts` — heartbeat interval writing `lastSeen`
+3. `src/hooks/usePresence.ts` — stale user filtering logic
+4. `src/services/firebase.ts` — connection config cleanup
+5. `src/components/Layout/Room.tsx` — removed debug logging
+
+### Review
+- Presence system now uses a 3-second heartbeat to keep `lastSeen` current in Realtime DB. Users whose `lastSeen` is older than 8 seconds are automatically filtered from the online list, eliminating ghost users that lingered after ungraceful disconnects.
+- Removed the `Content-Security-Policy` header from `firebase.json` that was blocking the Realtime DB WebSocket connection (`wss://*.firebaseio.com`).
+- Cleaned up verbose `console.log` debug statements left over from Phase 11 presence debugging.
+
+---
+
+## Phase 13: Color Panel Overlap Fix & Architecture Docs
+
+### 13.1 UI Overlap Fix
+- [x] Fix color panel overlapping Fabric.js rotation/corner handles
+- [x] Move floating context menu to vertical center of selected object
+
+### 13.2 Architecture Documentation
+- [x] Rewrite ARCHITECTURE.md as comprehensive ADR with Mermaid diagrams
+
+### Files modified
+1. `ARCHITECTURE.md` — full rewrite as ADR with Mermaid diagrams
+2. `src/components/Canvas/Canvas.tsx` — context menu repositioning
+3. `src/hooks/useCanvas.ts` — color panel z-index / overlap fix
+4. `src/components/Presence/OnlineUsers.tsx` — layout adjustments
+
+### Review
+- Fixed the color panel overlapping Fabric.js rotation and corner handles by adjusting positioning and z-index layering.
+- Floating context menu now anchors to the vertical center of the selected object for better ergonomics.
+- Rewrote `ARCHITECTURE.md` from scratch as a comprehensive Architecture Decision Record (ADR) including Mermaid diagrams for data flow, component hierarchy, and real-time sync pipelines.
+
+---
+
+## Phase 14: Direct Anthropic API + Enhanced AI System Prompt
+
+### 14.1 Vite Dev Proxy & API Fallback Chain
+- [x] Add Vite dev proxy for Anthropic API (bypasses CORS in dev only)
+- [x] Implement 3-tier AI fallback: direct API → Cloud Function → local regex
+- [x] Gate `VITE_ANTHROPIC_API_KEY` behind `import.meta.env.DEV`
+
+### 14.2 Enhanced AI Capabilities
+- [x] Enhanced system prompt with coordinate math, worked examples, decomposition patterns
+- [x] Add `rotateObject` tool, enrich canvas data sent to AI
+- [x] Bump Cloud Function max_tokens 1024 → 4096, add `textbox` to VALID_TYPES
+
+### 14.3 Infrastructure
+- [x] Add Firestore composite index for rate-limiting query
+
+### Files modified
+1. `vite.config.ts` — Anthropic API dev proxy
+2. `functions/src/index.ts` — max_tokens bump, textbox support
+3. `src/services/geminiService.ts` — 3-tier fallback chain, direct API client
+4. `src/hooks/useAIAgent.ts` — enhanced system prompt, rotateObject tool
+5. `firestore.indexes.json` — composite index for rate-limiting
+
+### Review
+- AI now uses a 3-tier fallback chain: direct Anthropic API (dev only, via Vite proxy to bypass CORS) → Cloud Function (production) → local regex parser. This gives developers instant AI responses without round-tripping through Firebase.
+- System prompt overhauled with coordinate math examples, multi-step decomposition patterns, and worked examples for complex layouts.
+- Added `rotateObject` tool and enriched the canvas snapshot data sent to the AI for better spatial reasoning.
+- Cloud Function bumped from 1024 to 4096 max_tokens to support longer multi-tool responses. Added `textbox` to VALID_TYPES for sticky note creation.
+- Firestore composite index added for the per-user rate-limiting query (`userId` + `createdAt`).
+
+---
+
+## Phase 15: Extract Canvas Position Helpers & Add Tests
+
+### 15.1 Utility Extraction
+- [x] Extract `snapToGrid`, `getTopLeftPosition`, `getAbsolutePosition` into `utils/canvasPosition.ts`
+
+### 15.2 Unit Tests
+- [x] Add 9 unit tests covering snap-to-grid and group-aware absolute positioning
+
+### Files modified
+1. `src/utils/canvasPosition.ts` (new) — extracted position helper functions
+2. `src/utils/canvasPosition.test.ts` (new) — 9 unit tests
+3. `src/components/Canvas/Canvas.tsx` — imports from new utility module
+
+### Review
+- Extracted three canvas position helper functions (`snapToGrid`, `getTopLeftPosition`, `getAbsolutePosition`) from `Canvas.tsx` into a dedicated `utils/canvasPosition.ts` module for reuse and testability.
+- Added 9 unit tests covering snap-to-grid rounding behavior and group-aware absolute positioning (handling nested objects inside Fabric.js `ActiveSelection` groups).
+
+---
+
+## Phase 16: Multi-Object Selection Remote Outlines & LWW Guard
+
+### 16.1 Multi-Selection Cursor Sync
+- [x] Widen cursor sync pipeline from single `selectedObjectId` to `selectedObjectIds: string[]`
+- [x] ActiveSelection now broadcasts all child IDs; remote users see outlines on every selected object
+- [x] Compute `localSelectedIds` as `Set<string>` for proper exclusion
+- [x] Position badge above first object in multi-selection
+
+### 16.2 Sync Robustness
+- [x] Per-ID debounce in useRealtimeSync (prevents multi-select race conditions)
+- [x] LWW guard: `activeObjectIds` ref blocks incoming updates for objects user is manipulating
+- [x] Batch `createObjects` for paste operations
+- [x] AI auto-selection after batch completes
+
+### 16.3 New Utilities & Tests
+- [x] `computeNewZIndex()` utility + `zIndex.test.ts`
+- [x] `useKeyboardShortcuts.test.ts` (9 tests)
+- [x] `aiService.test.ts`
+
+### Files modified
+1. `src/types/canvas.ts` — `selectedObjectIds: string[]` in cursor data
+2. `src/hooks/useCursorSync.ts` — broadcast array of selected IDs
+3. `src/components/Canvas/Canvas.tsx` — multi-selection outlines, badge positioning
+4. `src/components/Layout/Room.tsx` — batch create, AI auto-selection
+5. `src/hooks/useRealtimeSync.ts` — per-ID debounce, LWW guard, batch createObjects
+6. `src/utils/zIndex.ts` — `computeNewZIndex()` utility + tests
+
+### Review
+- Cursor sync pipeline widened from a single `selectedObjectId` string to a `selectedObjectIds` array. When a user multi-selects via `ActiveSelection`, all child object IDs are broadcast. Remote users now see colored outlines on every selected object, not just the first one.
+- Added per-ID debounce in `useRealtimeSync` to prevent race conditions when multiple objects are modified simultaneously during multi-select operations.
+- LWW (Last-Write-Wins) guard added: an `activeObjectIds` ref tracks objects the local user is currently manipulating, blocking incoming remote updates for those objects until the local operation completes.
+- Batch `createObjects` function for paste operations, with AI auto-selection of newly created objects after batch completes.
+- New test coverage: `zIndex.test.ts` for z-index computation, `useKeyboardShortcuts.test.ts` (9 tests), and `aiService.test.ts`.
+
+---
+
+## Phase 17: Fix Real-Time Object Sync (Movement / Resize / Rotation)
+
+### Diagnosis
+
+Real-time sync between devices was broken for object transformations. Both devices showed the same objects (creation sync worked), but when one user moved/resized/rotated an object, the other user never saw the change. Cursor sync and presence both worked (Realtime DB path), confirming the issue was in the Firestore object sync path.
+
+**Root cause:** The `handleObjectModified` callback in `Canvas.tsx` handled the Fabric.js `object:modified` event but **only recorded undo history** — it never called `onObjectModified()` to trigger Firestore sync. This was a regression from Phase 16 when batch history support was added for ActiveSelection.
+
+### 17.1 Add `onObjectModified` calls to `object:modified` handler
+- [x] **ActiveSelection (multi-select):** After batch history entries are recorded, iterate `batchEntries` and call `onObjectModified` for each child with its current props
+- [x] **Single object:** After history is recorded, call `onObjectModified(id, currentProps)` to sync to Firestore
+- [x] **Missing previousProps fallback:** If `previousProps` is missing (mouseDown not captured), still compute `currentProps` and sync
+
+### 17.2 Update useEffect dependency array
+- [x] Added `onObjectModified` to the dependency array of the `object:modified` useEffect (was `[fabricRef, addToHistory]`, now `[fabricRef, addToHistory, onObjectModified]`)
+
+### Files modified
+1. `src/components/Canvas/Canvas.tsx` — added `onObjectModified` calls in `handleObjectModified`, updated dependency array
+
+### Review
+- **Root cause fix:** The `handleObjectModified` handler (Fabric.js `object:modified` event) now calls `onObjectModified()` to trigger Firestore sync after recording undo history. Previously it only recorded history, leaving move/resize/rotate changes invisible to other users.
+- **3 sync paths added:** (1) ActiveSelection batch — syncs each child object individually, (2) single object with history — syncs after recording the undo entry, (3) single object without previousProps — syncs even when mouseDown state wasn't captured.
+- **Dependency array fixed:** `onObjectModified` added to the useEffect deps so the handler always has the latest callback reference.
+- TypeScript compiles clean, Vite build succeeds.
+
+---
+
+## Phase 18: Fix Multi-Object Sync Accuracy & Speed
+
+### Problem
+Multi-object moves (ActiveSelection) produced inaccurate and slow sync on remote devices:
+1. **Non-atomic writes**: N individual Firestore writes arrived at staggered times, showing partially-updated arrangements
+2. **N parallel writes + N animations**: 100ms debounce × N objects + staggered arrival = slow perceived sync
+3. **Silent skip**: Children without `previousProps` in ActiveSelection branch were never synced (no fallback)
+
+### 18.1 Add `batchSyncObjectsPartial` to canvasSync.ts
+- [x] New function using Firestore `WriteBatch` to send all object updates atomically in a single network request
+- [x] Snapshot listener receives all changes in a single `onSnapshot` callback
+
+### 18.2 Add `batchUpdateObjects` to useRealtimeSync.ts
+- [x] New function that updates local React state for all entries in a single `setObjects` call
+- [x] Increments `localPendingUpdates` refcount for each entry
+- [x] Calls `batchSyncObjectsPartial` directly (no debounce)
+- [x] Added `batch-update` message type to BroadcastChannel for demo mode
+
+### 18.3 Wire batch callback through Room.tsx → Canvas.tsx
+- [x] `useRealtimeSync` returns `batchUpdateObjects`
+- [x] `Room.tsx` creates `handleObjectsBatchModified` callback
+- [x] Passed as `onObjectsBatchModified` prop to Canvas
+
+### 18.4 Use batch path in ActiveSelection handler
+- [x] Replaced N individual `onObjectModified` calls with single `onObjectsBatchModified` call
+- [x] Added fallback for children without `previousProps` — still sync current state
+- [x] Updated useEffect dependency array to include `onObjectsBatchModified`
+
+### 18.5 Handle `batch-update` in BroadcastChannel
+- [x] Added `batch-update` case in BroadcastChannel message handler
+- [x] Applies all entries in a single `setObjects` call with editing/active guards
+
+### Files modified
+1. `src/services/canvasSync.ts` — added `batchSyncObjectsPartial` using WriteBatch
+2. `src/hooks/useRealtimeSync.ts` — added `batchUpdateObjects` + BroadcastChannel handler
+3. `src/components/Layout/Room.tsx` — wired batch callback
+4. `src/components/Canvas/Canvas.tsx` — batch sync in ActiveSelection handler + previousProps fallback
+
+### Review
+- **Atomic writes**: Multi-object moves now use a single Firestore `WriteBatch`, so all position changes arrive at remote clients simultaneously in one `onSnapshot` callback. No more split-second partial updates.
+- **Faster sync**: Eliminated N × 100ms debounce timers and N individual Firestore round-trips. One batch commit replaces them all.
+- **previousProps fallback**: Children without captured mouseDown state are no longer silently skipped — their current props are included in the batch sync.
+- **Demo mode**: BroadcastChannel `batch-update` message applies all entries in a single `setObjects` call.
+- TypeScript compiles clean, Vite build succeeds.
+
+---
+
+## Phase 19: Layer Management for ActiveSelection (Batch Z-Index)
+
+### 19.1 Add `computeBatchZIndex` to zIndex.ts
+- [x] New function computes zIndex values for a group of objects, preserving relative order
+- [x] Supports all 4 actions: bringToFront, sendToBack, bringForward, sendBackward
+
+### 19.2 Add `batchUpdateObjectZIndices` to canvasSync.ts
+- [x] Uses Firestore `WriteBatch` to atomically update zIndex for multiple objects
+
+### 19.3 Add `batchUpdateObjectZIndices` to useRealtimeSync.ts
+- [x] Optimistic local update in single `setObjects` call
+- [x] Increments `localPendingUpdates` refcount for each entry
+- [x] Calls `syncBatchUpdateObjectZIndices` directly (no debounce)
+
+### 19.4 Wire batch z-index callback through Room.tsx
+- [x] Created `handleObjectsZIndexChanged` callback
+- [x] Passed as `onObjectsZIndexChanged` prop to Canvas
+
+### 19.5 Update layer handlers in Canvas.tsx
+- [x] Added `onObjectsZIndexChanged` to `CanvasProps` interface
+- [x] Extracted shared `handleLayerBatch` helper that detects `ActiveSelection`
+- [x] ActiveSelection path: gets child IDs, computes batch z-indices, applies Fabric reorder, syncs via batch callback
+- [x] Single object path: unchanged existing logic
+
+### Files modified
+1. `src/utils/zIndex.ts` — added `computeBatchZIndex`
+2. `src/services/canvasSync.ts` — added `batchUpdateObjectZIndices` using WriteBatch
+3. `src/hooks/useRealtimeSync.ts` — added `batchUpdateObjectZIndices` + import
+4. `src/components/Layout/Room.tsx` — wired batch z-index callback
+5. `src/components/Canvas/Canvas.tsx` — updated 4 layer handlers with ActiveSelection support
+
+### Review
+- Layer management shortcuts (`] [ } {`) now work for multi-selected objects. When an `ActiveSelection` is active, `computeBatchZIndex` calculates new z-indices for all children while preserving their relative order within the group.
+- Firestore writes are atomic via `WriteBatch`, so all z-index changes arrive at remote clients simultaneously.
+- Single-object layer operations are unchanged (no regression).
+- TypeScript compiles clean, Vite build succeeds.

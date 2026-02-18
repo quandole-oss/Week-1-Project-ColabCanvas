@@ -1,18 +1,40 @@
 import { describe, it, expect } from 'vitest';
-import { snapToGrid, getAbsolutePosition } from './canvasPosition';
+import { snapToGrid, snapToGridStrokeAware, getAbsolutePosition } from './canvasPosition';
 
-describe('snapToGrid vs Math.round (proving the bug fix)', () => {
-  it('snapToGrid(130) returns 125 — snaps to 25px grid, causing a 5px shift', () => {
-    expect(snapToGrid(130)).toBe(125);
+describe('snapToGrid (50px visual-grid parity)', () => {
+  it('snaps 48 to 50 — rounds up to nearest grid line', () => {
+    expect(snapToGrid(48)).toBe(50);
   });
 
-  it('Math.round(130) returns 130 — no shift, just eliminates sub-pixel values', () => {
-    expect(Math.round(130)).toBe(130);
+  it('snaps 2 to 0 — rounds down to nearest grid line', () => {
+    expect(snapToGrid(2)).toBe(0);
   });
 
-  it('Math.round handles sub-pixel values correctly', () => {
-    expect(Math.round(130.4)).toBe(130);
-    expect(Math.round(130.6)).toBe(131);
+  it('snaps 130 to 150 — nearest 50px increment', () => {
+    expect(snapToGrid(130)).toBe(150);
+  });
+
+  it('snaps 25 to 50 — midpoint rounds up', () => {
+    expect(snapToGrid(25)).toBe(50);
+  });
+
+  it('snaps 24 to 0 — just below midpoint rounds down', () => {
+    expect(snapToGrid(24)).toBe(0);
+  });
+});
+
+describe('snapToGridStrokeAware', () => {
+  it('with strokeWidth=2, shifts visual edge to grid then back', () => {
+    // value=49, strokeWidth=2: visual edge = 49-1 = 48, snaps to 50, result = 50+1 = 51
+    expect(snapToGridStrokeAware(49, 2, false)).toBe(51);
+  });
+
+  it('with strokeUniform=true, ignores stroke offset', () => {
+    expect(snapToGridStrokeAware(48, 2, true)).toBe(50);
+  });
+
+  it('with strokeWidth=0, behaves like plain snapToGrid', () => {
+    expect(snapToGridStrokeAware(48, 0, false)).toBe(50);
   });
 });
 

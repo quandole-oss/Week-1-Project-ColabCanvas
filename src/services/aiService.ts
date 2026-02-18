@@ -1,4 +1,5 @@
 import type { CanvasObject, CanvasObjectProps, ShapeType } from '../types';
+import type { ZIndexAction } from '../utils/zIndex';
 
 // AI Tool definitions for OpenAI function calling
 export const AI_TOOLS = [
@@ -245,6 +246,53 @@ export const AI_TOOLS = [
       },
     },
   },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'duplicateObject',
+      description: 'Duplicate an existing object with a slight offset',
+      parameters: {
+        type: 'object',
+        properties: {
+          objectId: {
+            type: 'string',
+            description: 'The ID of the object to duplicate',
+          },
+          offsetX: {
+            type: 'number',
+            description: 'Horizontal offset for the duplicate (default 20)',
+          },
+          offsetY: {
+            type: 'number',
+            description: 'Vertical offset for the duplicate (default 20)',
+          },
+        },
+        required: ['objectId'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'reorderObject',
+      description: 'Change the layer order of an object (bring to front, send to back, etc.)',
+      parameters: {
+        type: 'object',
+        properties: {
+          objectId: {
+            type: 'string',
+            description: 'The ID of the object to reorder',
+          },
+          action: {
+            type: 'string',
+            enum: ['bringToFront', 'sendToBack', 'bringForward', 'sendBackward'],
+            description: 'The reorder action to perform',
+          },
+        },
+        required: ['objectId', 'action'],
+      },
+    },
+  },
 ];
 
 export interface AIAction {
@@ -280,6 +328,7 @@ const VALID_ACTION_TYPES = new Set([
   'createShape', 'moveObject', 'resizeObject', 'rotateObject',
   'deleteObject', 'arrangeObjects', 'createLoginForm',
   'createNavigationBar', 'getCanvasState',
+  'duplicateObject', 'reorderObject',
 ]);
 
 const VALID_SHAPE_TYPES = new Set([
@@ -292,7 +341,8 @@ export function executeAIAction(
   canvasObjects: Map<string, CanvasObject>,
   createObject: (type: ShapeType, props: CanvasObjectProps) => string,
   updateObject: (id: string, props: Partial<CanvasObjectProps>) => void,
-  deleteObject: (id: string) => void
+  deleteObject: (id: string) => void,
+  reorderObject?: (id: string, action: ZIndexAction) => void
 ): { success: boolean; message: string; createdIds?: string[] } {
   const { type, params } = action;
 
@@ -548,6 +598,44 @@ export function executeAIAction(
       return { success: true, message: JSON.stringify(objects, null, 2) };
     }
 
+    case 'duplicateObject': {
+      const { objectId, offsetX = 20, offsetY = 20 } = params as {
+        objectId: string;
+        offsetX?: number;
+        offsetY?: number;
+      };
+
+      const original = canvasObjects.get(objectId);
+      if (!original) {
+        return { success: false, message: `Object ${objectId} not found` };
+      }
+
+      const newProps: CanvasObjectProps = {
+        ...original.props,
+        left: original.props.left + offsetX,
+        top: original.props.top + offsetY,
+      };
+
+      const newId = createObject(original.type, newProps);
+      return { success: true, message: `Duplicated object ${objectId}`, createdIds: [newId] };
+    }
+
+    case 'reorderObject': {
+      const { objectId, action: reorderAction } = params as {
+        objectId: string;
+        action: ZIndexAction;
+      };
+
+      if (!canvasObjects.has(objectId)) {
+        return { success: false, message: `Object ${objectId} not found` };
+      }
+
+      if (reorderObject) {
+        reorderObject(objectId, reorderAction);
+      }
+      return { success: true, message: `Reordered object ${objectId}: ${reorderAction}` };
+    }
+
     default:
       return { success: false, message: `Unknown action type: ${type}` };
   }
@@ -563,6 +651,8 @@ You can:
 - Move, resize, and rotate existing objects
 - Delete objects
 - Arrange objects in layouts (rows, columns, grids)
+- Duplicate existing objects
+- Reorder object layers (bring to front, send to back, bring forward, send backward)
 - Create UI mockups like login forms and navigation bars
 
 IMPORTANT: Parse the user's request carefully. Look for:

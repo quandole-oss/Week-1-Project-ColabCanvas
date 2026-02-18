@@ -119,7 +119,7 @@ export function useCursorSync({
   }, [roomId, odId]);
 
   // Track current selection, position, and motion state for broadcast
-  const currentSelectionRef = useRef<string | null>(null);
+  const currentSelectionRef = useRef<string[] | null>(null);
   const lastPositionRef = useRef({ x: 0, y: 0 });
   const isMovingRef = useRef(false);
 
@@ -132,7 +132,7 @@ export function useCursorSync({
       userName,
       color: userColor,
       lastActive: Date.now(),
-      selectedObjectId: currentSelectionRef.current,
+      selectedObjectIds: currentSelectionRef.current,
       isMoving: isMovingRef.current,
     };
 
@@ -173,21 +173,21 @@ export function useCursorSync({
 
   // Broadcast cursor - selection/motion changes are immediate, position is throttled
   const broadcastCursor = useCallback(
-    (x: number, y: number, selectedObjectId?: string | null, isMoving?: boolean) => {
+    (x: number, y: number, selectedObjectIds?: string[] | null, isMoving?: boolean) => {
       // Always update position ref
       lastPositionRef.current = { x, y };
 
-      // Check if selection changed
-      const selectionChanged = selectedObjectId !== undefined &&
-        selectedObjectId !== currentSelectionRef.current;
+      // Check if selection changed (array comparison)
+      const selectionChanged = selectedObjectIds !== undefined &&
+        JSON.stringify(selectedObjectIds) !== JSON.stringify(currentSelectionRef.current);
 
       // Check if motion state changed
       const motionChanged = isMoving !== undefined &&
         isMoving !== isMovingRef.current;
 
       // Update selection ref if provided
-      if (selectedObjectId !== undefined) {
-        currentSelectionRef.current = selectedObjectId;
+      if (selectedObjectIds !== undefined) {
+        currentSelectionRef.current = selectedObjectIds;
       }
 
       // Update motion ref if provided

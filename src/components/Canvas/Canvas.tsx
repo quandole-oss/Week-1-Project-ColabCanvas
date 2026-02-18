@@ -2,12 +2,13 @@ import { useRef, useEffect, useState, useCallback, type ReactNode } from 'react'
 import { Rect, Circle, Line, Polygon, Triangle, Textbox, FabricObject, ActiveSelection } from 'fabric';
 import type { TPointerEventInfo, TPointerEvent } from 'fabric';
 import { v4 as uuidv4 } from 'uuid';
-import { useCanvas } from '../../hooks/useCanvas';
+import { useCanvas, sendGridToBack } from '../../hooks/useCanvas';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { CanvasToolbar } from './CanvasToolbar';
 import { CursorOverlay } from './CursorOverlay';
 import type { CanvasObjectProps, ShapeType, CursorState, CanvasObject } from '../../types';
-import { snapToGrid, getAbsolutePosition } from '../../utils/canvasPosition';
+import { getAbsolutePosition } from '../../utils/canvasPosition';
+import { computeBatchZIndex, type ZIndexAction } from '../../utils/zIndex';
 
 // History entry for undo (supports single or batch operations)
 export interface HistoryEntry {
@@ -27,13 +28,17 @@ interface CanvasProps {
   onObjectCreated?: (id: string, type: ShapeType, props: CanvasObjectProps, zIndex: number) => void;
   onObjectsCreated?: (objects: { id: string; type: ShapeType; props: CanvasObjectProps; zIndex: number }[]) => void;
   onObjectModified?: (id: string, props: CanvasObjectProps) => void;
+  onObjectsBatchModified?: (entries: Array<{ id: string; props: CanvasObjectProps }>) => void;
   onFlushSync?: () => void;
   onEditingObjectChange?: (id: string | null) => void;
   onObjectDeleted?: (id: string) => void;
-  onCursorMove?: (x: number, y: number, selectedObjectId?: string | null, isMoving?: boolean) => void;
+  onCursorMove?: (x: number, y: number, selectedObjectIds?: string[] | null, isMoving?: boolean) => void;
   onViewportCenterChange?: (getCenter: () => { x: number; y: number }) => void;
   onHistoryAddChange?: (addHistory: (entry: HistoryEntry) => void) => void;
   onObjectZIndexChanged?: (id: string, zIndex: number) => void;
+  onObjectsZIndexChanged?: (entries: Array<{ id: string; zIndex: number }>) => void;
+  onSelectObjectsReady?: (fn: (ids: string[]) => void) => void;
+  onActiveObjectsChange?: (ids: Set<string> | null) => void;
   remoteCursors?: Map<string, CursorState>;
   remoteObjects?: Map<string, CanvasObject>;
 }
@@ -42,6 +47,7 @@ export function Canvas({
   onObjectCreated,
   onObjectsCreated,
   onObjectModified,
+  onObjectsBatchModified,
   onFlushSync,
   onEditingObjectChange,
   onObjectDeleted,
@@ -49,6 +55,9 @@ export function Canvas({
   onViewportCenterChange,
   onHistoryAddChange,
   onObjectZIndexChanged,
+  onObjectsZIndexChanged,
+  onSelectObjectsReady,
+  onActiveObjectsChange,
   remoteCursors = new Map(),
   remoteObjects,
 }: CanvasProps) {
@@ -79,6 +88,8 @@ export function Canvas({
   const textBufferRef = useRef<Map<string, string>>(new Map());
   // Track the Fabric Textbox currently being edited (getActiveObject is unreliable in exit event)
   const editingTextboxRef = useRef<{ id: string; obj: Textbox } | null>(null);
+  // Pending AI-created object IDs to auto-select after sync
+  const pendingSelectionIdsRef = useRef<string[]>([]);
 
   const {
     fabricRef,
@@ -147,6 +158,50 @@ export function Canvas({
       onHistoryAddChange(addToHistory);
     }
   }, [onHistoryAddChange, addToHistory]);
+
+  // Expose selectObjects function to parent for AI auto-selection
+  useEffect(() => {
+    if (onSelectObjectsReady) {
+      onSelectObjectsReady((ids: string[]) => {
+        pendingSelectionIdsRef.current = ids;
+      });
+    }
+  }, [onSelectObjectsReady]);
+
+  // Report active selection changes to parent (for LWW guard)
+  useEffect(() => {
+    const canvas = fabricRef.current;
+    if (!canvas || !onActiveObjectsChange) return;
+
+    const collectIds = () => {
+      const active = canvas.getActiveObject();
+      if (!active) {
+        onActiveObjectsChange(null);
+        return;
+      }
+      const ids = new Set<string>();
+      if (active instanceof ActiveSelection) {
+        active.getObjects().forEach((o) => {
+          const id = (o as FabricObject & { id?: string }).id;
+          if (id) ids.add(id);
+        });
+      } else {
+        const id = (active as FabricObject & { id?: string }).id;
+        if (id) ids.add(id);
+      }
+      onActiveObjectsChange(ids.size > 0 ? ids : null);
+    };
+
+    canvas.on('selection:created', collectIds);
+    canvas.on('selection:updated', collectIds);
+    canvas.on('selection:cleared', collectIds);
+
+    return () => {
+      canvas.off('selection:created', collectIds);
+      canvas.off('selection:updated', collectIds);
+      canvas.off('selection:cleared', collectIds);
+    };
+  }, [fabricRef, onActiveObjectsChange]);
 
   // Change cursor and selection based on tool
   const isDrawingTool = tool === 'rect' || tool === 'circle' || tool === 'triangle' ||
@@ -717,54 +772,60 @@ export function Canvas({
     isPastingRef.current = false;
   }, [fabricRef, onObjectCreated, onObjectsCreated, addToHistory, onFlushSync]);
 
-  // Layer management callbacks
-  const handleLayerForward = useCallback(() => {
+  // Layer management callbacks — shared helper for ActiveSelection batch reorder
+  const handleLayerBatch = useCallback((action: ZIndexAction, fabricAction: (obj: FabricObject) => void) => {
     const canvas = fabricRef.current;
     if (!canvas) return;
     const activeObj = canvas.getActiveObject();
     if (!activeObj) return;
-    const id = (activeObj as FabricObject & { id?: string }).id;
-    if (!id) return;
-    canvas.bringObjectForward(activeObj);
-    const newIdx = canvas.getObjects().indexOf(activeObj);
-    onObjectZIndexChanged?.(id, newIdx);
-  }, [fabricRef, onObjectZIndexChanged]);
+
+    if (activeObj instanceof ActiveSelection) {
+      // Batch: compute new z-indices from React state, apply to Fabric canvas, sync
+      if (!remoteObjects) return;
+      const allObjects = Array.from(remoteObjects.values()).map((o) => ({ id: o.id, zIndex: o.zIndex }));
+      const childIds = activeObj.getObjects()
+        .map((c) => (c as FabricObject & { id?: string }).id)
+        .filter((id): id is string => !!id);
+      if (childIds.length === 0) return;
+      const entries = computeBatchZIndex(allObjects, childIds, action);
+      if (entries.length === 0) return;
+      // Apply Fabric visual reorder: move each child individually (sorted by new zIndex)
+      const sorted = [...entries].sort((a, b) => a.zIndex - b.zIndex);
+      for (const entry of sorted) {
+        const fabricObj = canvas.getObjects().find(
+          (o) => (o as FabricObject & { id?: string }).id === entry.id
+        );
+        if (fabricObj) fabricAction(fabricObj);
+      }
+      sendGridToBack(canvas);
+      canvas.renderAll();
+      onObjectsZIndexChanged?.(entries);
+    } else {
+      // Single object: existing logic
+      const id = (activeObj as FabricObject & { id?: string }).id;
+      if (!id) return;
+      fabricAction(activeObj);
+      sendGridToBack(canvas);
+      const newIdx = canvas.getObjects().indexOf(activeObj);
+      onObjectZIndexChanged?.(id, newIdx);
+    }
+  }, [fabricRef, remoteObjects, onObjectZIndexChanged, onObjectsZIndexChanged]);
+
+  const handleLayerForward = useCallback(() => {
+    handleLayerBatch('bringForward', (obj) => fabricRef.current?.bringObjectForward(obj));
+  }, [handleLayerBatch, fabricRef]);
 
   const handleLayerBackward = useCallback(() => {
-    const canvas = fabricRef.current;
-    if (!canvas) return;
-    const activeObj = canvas.getActiveObject();
-    if (!activeObj) return;
-    const id = (activeObj as FabricObject & { id?: string }).id;
-    if (!id) return;
-    canvas.sendObjectBackwards(activeObj);
-    const newIdx = canvas.getObjects().indexOf(activeObj);
-    onObjectZIndexChanged?.(id, newIdx);
-  }, [fabricRef, onObjectZIndexChanged]);
+    handleLayerBatch('sendBackward', (obj) => fabricRef.current?.sendObjectBackwards(obj));
+  }, [handleLayerBatch, fabricRef]);
 
   const handleLayerToFront = useCallback(() => {
-    const canvas = fabricRef.current;
-    if (!canvas) return;
-    const activeObj = canvas.getActiveObject();
-    if (!activeObj) return;
-    const id = (activeObj as FabricObject & { id?: string }).id;
-    if (!id) return;
-    canvas.bringObjectToFront(activeObj);
-    const newIdx = canvas.getObjects().indexOf(activeObj);
-    onObjectZIndexChanged?.(id, newIdx);
-  }, [fabricRef, onObjectZIndexChanged]);
+    handleLayerBatch('bringToFront', (obj) => fabricRef.current?.bringObjectToFront(obj));
+  }, [handleLayerBatch, fabricRef]);
 
   const handleLayerToBack = useCallback(() => {
-    const canvas = fabricRef.current;
-    if (!canvas) return;
-    const activeObj = canvas.getActiveObject();
-    if (!activeObj) return;
-    const id = (activeObj as FabricObject & { id?: string }).id;
-    if (!id) return;
-    canvas.sendObjectToBack(activeObj);
-    const newIdx = canvas.getObjects().indexOf(activeObj);
-    onObjectZIndexChanged?.(id, newIdx);
-  }, [fabricRef, onObjectZIndexChanged]);
+    handleLayerBatch('sendToBack', (obj) => fabricRef.current?.sendObjectToBack(obj));
+  }, [handleLayerBatch, fabricRef]);
 
   // Keyboard shortcuts (extracted from inline useEffect)
   useKeyboardShortcuts({
@@ -812,12 +873,46 @@ export function Canvas({
       // Handle ActiveSelection: create a batch history entry for all children
       if (obj instanceof ActiveSelection) {
         const batchEntries: HistoryEntry[] = [];
+        const fallbackSyncEntries: Array<{ id: string; props: CanvasObjectProps }> = [];
+
+        // Post-process props for a child inside an ActiveSelection:
+        // flatten group scale into dimensions and snap position to grid
+        const postProcess = (child: FabricObject, props: CanvasObjectProps): CanvasObjectProps => {
+          const matrix = child.calcTransformMatrix();
+          const effScaleX = Math.sqrt(matrix[0] * matrix[0] + matrix[1] * matrix[1]);
+          const effScaleY = Math.sqrt(matrix[2] * matrix[2] + matrix[3] * matrix[3]);
+
+          // Flatten effective scale into actual dimensions
+          const actualWidth = Math.round((child.width ?? 0) * effScaleX);
+          let actualHeight = Math.round((child.height ?? 0) * effScaleY);
+
+          // Handle sticky note height
+          if (child instanceof Textbox) {
+            const customType = (child as FabricObject & { customType?: string }).customType;
+            if (customType === 'sticky') {
+              const storedH = (child as any)._stickyHeight ?? 200;
+              const wasResized = effScaleY !== 1;
+              actualHeight = wasResized ? Math.round(storedH * effScaleY) : storedH;
+              (child as any)._stickyHeight = actualHeight;
+              (child as any).minWidth = Math.max(actualWidth, 40);
+            }
+          }
+
+          if (props.width !== undefined) props.width = actualWidth;
+          if (props.height !== undefined) props.height = actualHeight;
+          if (props.radius !== undefined) props.radius = Math.round(props.radius * effScaleX);
+          props.scaleX = 1;
+          props.scaleY = 1;
+
+          return props;
+        };
+
         obj.getObjects().forEach((child) => {
           const childId = (child as FabricObject & { id?: string }).id;
           if (childId) {
             const previousProps = objectStateBeforeModifyRef.current.get(childId);
             if (previousProps) {
-              const currentProps = getObjectProps(child);
+              const currentProps = postProcess(child, getObjectProps(child));
               if (JSON.stringify(previousProps) !== JSON.stringify(currentProps)) {
                 batchEntries.push({
                   type: 'modify',
@@ -828,6 +923,10 @@ export function Canvas({
                 });
               }
               objectStateBeforeModifyRef.current.delete(childId);
+            } else {
+              // Fallback: no previousProps captured — still sync current state
+              const currentProps = postProcess(child, getObjectProps(child));
+              fallbackSyncEntries.push({ id: childId, props: currentProps });
             }
           }
         });
@@ -836,6 +935,20 @@ export function Canvas({
         } else if (batchEntries.length > 1) {
           addToHistory({ type: 'batch', objectId: 'multi-select', batchEntries });
         }
+        // Batch-sync all modified children atomically (single Firestore WriteBatch)
+        const syncEntries = batchEntries
+          .filter((e) => e.props)
+          .map((e) => ({ id: e.objectId, props: e.props! }));
+        // Merge any fallback entries (children without previousProps)
+        syncEntries.push(...fallbackSyncEntries);
+        if (syncEntries.length > 0) {
+          onObjectsBatchModified?.(syncEntries);
+        }
+        // Update Fabric's internal selection bounds for all children
+        requestAnimationFrame(() => {
+          obj.getObjects().forEach((child) => child.setCoords());
+          canvas.requestRenderAll();
+        });
         return;
       }
       const id = (obj as FabricObject & { id?: string }).id;
@@ -854,6 +967,12 @@ export function Canvas({
             });
           }
           objectStateBeforeModifyRef.current.delete(id);
+          // Sync to Firestore
+          onObjectModified?.(id, currentProps);
+        } else {
+          // No previousProps (mouseDown not captured) — still sync
+          const currentProps = getObjectProps(obj);
+          onObjectModified?.(id, currentProps);
         }
       }
     };
@@ -865,7 +984,7 @@ export function Canvas({
       canvas.off('mouse:down', handleMouseDown);
       canvas.off('object:modified', handleObjectModified);
     };
-  }, [fabricRef, addToHistory]);
+  }, [fabricRef, addToHistory, onObjectModified, onObjectsBatchModified]);
 
   // Text editing lifecycle: lock during editing, buffer keystrokes, sync only on blur.
   useEffect(() => {
@@ -945,12 +1064,17 @@ export function Canvas({
     const handleSelectionCreated = () => {
       const activeObject = canvas.getActiveObject();
       if (activeObject) {
-        const id = (activeObject as FabricObject & { id?: string }).id;
-        if (id) {
-          // Broadcast selection with current position (not moving)
-          if (activeObject.left !== undefined && activeObject.top !== undefined) {
-            onCursorMove(activeObject.left, activeObject.top, id, false);
-          }
+        let ids: string[] = [];
+        if (activeObject instanceof ActiveSelection) {
+          ids = activeObject.getObjects()
+            .map((o) => (o as FabricObject & { id?: string }).id)
+            .filter((id): id is string => !!id);
+        } else {
+          const id = (activeObject as FabricObject & { id?: string }).id;
+          if (id) ids = [id];
+        }
+        if (ids.length > 0 && activeObject.left !== undefined && activeObject.top !== undefined) {
+          onCursorMove(activeObject.left, activeObject.top, ids, false);
         }
       }
     };
@@ -960,25 +1084,34 @@ export function Canvas({
       onCursorMove(0, 0, null, false);
     };
 
+    // Helper to extract all selected IDs from active object
+    const getActiveIds = (): string[] => {
+      const activeObject = canvas.getActiveObject();
+      if (!activeObject) return [];
+      if (activeObject instanceof ActiveSelection) {
+        return activeObject.getObjects()
+          .map((o) => (o as FabricObject & { id?: string }).id)
+          .filter((id): id is string => !!id);
+      }
+      const id = (activeObject as FabricObject & { id?: string }).id;
+      return id ? [id] : [];
+    };
+
     // Broadcast when object starts moving (hide outline on remote)
     const handleObjectMoving = () => {
       const activeObject = canvas.getActiveObject();
-      if (activeObject) {
-        const id = (activeObject as FabricObject & { id?: string }).id;
-        if (id && activeObject.left !== undefined && activeObject.top !== undefined) {
-          onCursorMove(activeObject.left, activeObject.top, id, true);
-        }
+      const ids = getActiveIds();
+      if (ids.length > 0 && activeObject && activeObject.left !== undefined && activeObject.top !== undefined) {
+        onCursorMove(activeObject.left, activeObject.top, ids, true);
       }
     };
 
     // Broadcast when object stops moving (show outline again)
     const handleMotionEnd = () => {
       const activeObject = canvas.getActiveObject();
-      if (activeObject) {
-        const id = (activeObject as FabricObject & { id?: string }).id;
-        if (id && activeObject.left !== undefined && activeObject.top !== undefined) {
-          onCursorMove(activeObject.left, activeObject.top, id, false);
-        }
+      const ids = getActiveIds();
+      if (ids.length > 0 && activeObject && activeObject.left !== undefined && activeObject.top !== undefined) {
+        onCursorMove(activeObject.left, activeObject.top, ids, false);
       }
     };
 
@@ -1115,7 +1248,14 @@ export function Canvas({
 
     const updatePos = () => {
       const activeObj = canvas.getActiveObject();
-      if (!activeObj || !(activeObj as FabricObject & { id?: string }).id) {
+      if (!activeObj) {
+        setContextMenuPos(null);
+        return;
+      }
+      // Allow both single objects (with .id) and ActiveSelection (multi-select)
+      const isSingle = !!(activeObj as FabricObject & { id?: string }).id;
+      const isMulti = activeObj instanceof ActiveSelection;
+      if (!isSingle && !isMulti) {
         setContextMenuPos(null);
         return;
       }
@@ -1204,7 +1344,7 @@ export function Canvas({
         obj.evented = false;
       });
 
-      const pointer = { x: snapToGrid(opt.scenePoint.x), y: snapToGrid(opt.scenePoint.y) };
+      const pointer = { x: opt.scenePoint.x, y: opt.scenePoint.y };
       isDrawingRef.current = true;
       drawStartRef.current = { x: pointer.x, y: pointer.y };
 
@@ -1548,9 +1688,6 @@ export function Canvas({
             topLeftY -= height / 2;
           }
 
-          // Snap to grid for consistent positioning across clients
-          topLeftX = snapToGrid(topLeftX);
-          topLeftY = snapToGrid(topLeftY);
           shape.set({ left: topLeftX, top: topLeftY, originX: 'left', originY: 'top' });
         } else if (shape instanceof Circle) {
           const radius = (shape.radius ?? 0) * (shape.scaleX ?? 1);
@@ -1565,15 +1702,11 @@ export function Canvas({
             topLeftY -= radius;
           }
 
-          // Snap to grid for consistent positioning across clients
-          topLeftX = snapToGrid(topLeftX);
-          topLeftY = snapToGrid(topLeftY);
           shape.set({ left: topLeftX, top: topLeftY, originX: 'left', originY: 'top' });
         } else if (shape instanceof Textbox) {
-          // Snap sticky notes to grid
           shape.set({
-            left: snapToGrid(shape.left ?? 0),
-            top: snapToGrid(shape.top ?? 0),
+            left: shape.left ?? 0,
+            top: shape.top ?? 0,
             originX: 'left',
             originY: 'top',
           });
@@ -1723,8 +1856,31 @@ export function Canvas({
       }
     });
 
+    // Process pending AI auto-selection
+    if (pendingSelectionIdsRef.current.length > 0) {
+      const ids = pendingSelectionIdsRef.current;
+      const fabricObjs = ids
+        .map((id) =>
+          canvas.getObjects().find((o) => (o as FabricObject & { id?: string }).id === id)
+        )
+        .filter(Boolean) as FabricObject[];
+
+      if (fabricObjs.length === ids.length) {
+        // All objects found on canvas — select them
+        pendingSelectionIdsRef.current = [];
+        fabricObjs.forEach((obj) => obj.setCoords());
+        if (fabricObjs.length === 1) {
+          canvas.setActiveObject(fabricObjs[0]);
+        } else {
+          const selection = new ActiveSelection(fabricObjs, { canvas });
+          canvas.setActiveObject(selection);
+        }
+        setTool('select');
+      }
+    }
+
     canvas.renderAll();
-  }, [fabricRef, remoteObjects]);
+  }, [fabricRef, remoteObjects, setTool]);
 
 
   // Detect when remote objects stop moving by tracking position changes
@@ -1769,22 +1925,35 @@ export function Canvas({
   }, [remoteObjects, stableObjects]);
 
   // Compute remote selections for overlay (hide when object is being moved)
-  const remoteSelections = new Map<string, { color: string; userName: string; objectId: string }>();
+  const remoteSelections = new Map<string, { color: string; userName: string; objectIds: string[] }>();
   remoteCursors.forEach((cursor) => {
-    // Only show selection outline when object is stationary (stable position)
-    if (cursor.selectedObjectId && stableObjects.has(cursor.selectedObjectId)) {
-      remoteSelections.set(cursor.userId, {
-        color: cursor.color,
-        userName: cursor.userName,
-        objectId: cursor.selectedObjectId,
-      });
+    if (cursor.selectedObjectIds && cursor.selectedObjectIds.length > 0) {
+      // Only include IDs whose positions are stable (not being moved)
+      const stableIds = cursor.selectedObjectIds.filter((id) => stableObjects.has(id));
+      if (stableIds.length > 0) {
+        remoteSelections.set(cursor.userId, {
+          color: cursor.color,
+          userName: cursor.userName,
+          objectIds: stableIds,
+        });
+      }
     }
   });
 
-  // Get local selected object ID for excluding from remote highlights
-  const localSelectedId = fabricRef.current?.getActiveObject()
-    ? (fabricRef.current.getActiveObject() as FabricObject & { id?: string }).id
-    : null;
+  // Get local selected object IDs for excluding from remote highlights
+  const localSelectedIds = new Set<string>();
+  const localActive = fabricRef.current?.getActiveObject();
+  if (localActive) {
+    if (localActive instanceof ActiveSelection) {
+      localActive.getObjects().forEach((o) => {
+        const id = (o as FabricObject & { id?: string }).id;
+        if (id) localSelectedIds.add(id);
+      });
+    } else {
+      const id = (localActive as FabricObject & { id?: string }).id;
+      if (id) localSelectedIds.add(id);
+    }
+  }
 
   // Apply/remove stroke highlights for remote selections
   useEffect(() => {
@@ -1794,9 +1963,11 @@ export function Canvas({
     // Build set of object IDs that should be highlighted
     const shouldHighlight = new Set<string>();
     remoteSelections.forEach((selection) => {
-      // Don't highlight objects the local user has selected
-      if (selection.objectId !== localSelectedId) {
-        shouldHighlight.add(selection.objectId);
+      for (const objectId of selection.objectIds) {
+        // Don't highlight objects the local user has selected
+        if (!localSelectedIds.has(objectId)) {
+          shouldHighlight.add(objectId);
+        }
       }
     });
 
@@ -1821,57 +1992,59 @@ export function Canvas({
 
     // Apply highlights to newly selected objects
     remoteSelections.forEach((selection) => {
-      const objectId = selection.objectId;
-      // Skip if local user has this object selected
-      if (objectId === localSelectedId) return;
-      // Skip if already highlighted
-      if (remoteHighlightsRef.current.has(objectId)) {
-        // Update highlight color if it changed
+      for (const objectId of selection.objectIds) {
+        // Skip if local user has this object selected
+        if (localSelectedIds.has(objectId)) continue;
+        // Skip if already highlighted
+        if (remoteHighlightsRef.current.has(objectId)) {
+          // Update highlight color if it changed
+          const obj = canvas.getObjects().find(
+            (o) => (o as FabricObject & { id?: string }).id === objectId
+          );
+          if (obj && obj.stroke !== selection.color) {
+            obj.set({
+              stroke: selection.color,
+              strokeWidth: 4,
+            });
+          }
+          continue;
+        }
+
         const obj = canvas.getObjects().find(
           (o) => (o as FabricObject & { id?: string }).id === objectId
-        );
-        if (obj && obj.stroke !== selection.color) {
+        ) as FabricObject & { _remoteHighlightOriginal?: { stroke: string | null; strokeWidth: number } };
+        if (obj) {
+          // Store original stroke on the object itself (so getObjectProps can access it)
+          const originalStroke = obj.stroke as string | null;
+          const originalStrokeWidth = obj.strokeWidth ?? 2;
+          obj._remoteHighlightOriginal = {
+            stroke: originalStroke,
+            strokeWidth: originalStrokeWidth,
+          };
+          remoteHighlightsRef.current.set(objectId, {
+            stroke: originalStroke,
+            strokeWidth: originalStrokeWidth,
+          });
           obj.set({
             stroke: selection.color,
             strokeWidth: 4,
           });
         }
-        return;
-      }
-
-      const obj = canvas.getObjects().find(
-        (o) => (o as FabricObject & { id?: string }).id === objectId
-      ) as FabricObject & { _remoteHighlightOriginal?: { stroke: string | null; strokeWidth: number } };
-      if (obj) {
-        // Store original stroke on the object itself (so getObjectProps can access it)
-        const originalStroke = obj.stroke as string | null;
-        const originalStrokeWidth = obj.strokeWidth ?? 2;
-        obj._remoteHighlightOriginal = {
-          stroke: originalStroke,
-          strokeWidth: originalStrokeWidth,
-        };
-        remoteHighlightsRef.current.set(objectId, {
-          stroke: originalStroke,
-          strokeWidth: originalStrokeWidth,
-        });
-        obj.set({
-          stroke: selection.color,
-          strokeWidth: 4,
-        });
       }
     });
 
     canvas.renderAll();
-  }, [fabricRef, remoteSelections, localSelectedId]);
+  }, [fabricRef, remoteSelections, localSelectedIds]);
 
-  // Compute floating context menu for selected object
+  // Compute floating context menu for selected object(s)
   let floatingMenu: ReactNode = null;
   if (contextMenuPos) {
     const activeObj = fabricRef.current?.getActiveObject();
     const activeObjId = activeObj ? (activeObj as FabricObject & { id?: string }).id : null;
-    if (activeObj && activeObjId) {
-      const isTextElement = activeObj instanceof Textbox;
-      const isLineElement = activeObj instanceof Line;
+    const isMultiSelect = activeObj instanceof ActiveSelection;
+    if (activeObj && (activeObjId || isMultiSelect)) {
+      const isTextElement = !isMultiSelect && activeObj instanceof Textbox;
+      const isLineElement = !isMultiSelect && activeObj instanceof Line;
       const currentFill = (activeObj.fill as string) || '#4F46E5';
       const currentStroke = (activeObj.stroke as string) || '#3b82f6';
 
@@ -1880,25 +2053,67 @@ export function Canvas({
           className="absolute z-30 flex flex-col gap-1.5 p-1.5 bg-white/90 backdrop-blur-sm rounded-lg shadow-lg border border-white/30 pointer-events-none"
           style={{ left: contextMenuPos.left, top: contextMenuPos.top }}
         >
-          {isTextElement ? (
+          {/* Color pickers — single object only */}
+          {!isMultiSelect && isTextElement ? (
             <label className="relative w-8 h-8 block cursor-pointer pointer-events-auto" title="Text color">
               <div className="w-8 h-8 rounded-full border-2 border-white shadow-md" style={{ backgroundColor: currentFill }} />
               <input type="color" value={currentFill} onChange={(e) => setTextColor(e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
             </label>
-          ) : !isLineElement ? (
+          ) : !isMultiSelect && !isLineElement ? (
             <label className="relative w-8 h-8 block cursor-pointer pointer-events-auto" title="Fill color">
               <div className="w-8 h-8 rounded-full border-2 border-white shadow-md" style={{ backgroundColor: currentFill }} />
               <input type="color" value={currentFill} onChange={(e) => setFillColor(e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
             </label>
           ) : null}
 
-          {!isTextElement && (
+          {!isMultiSelect && !isTextElement && (
             <label className="relative w-8 h-8 block cursor-pointer pointer-events-auto" title="Border color">
               <div className="w-8 h-8 rounded-full border-2 border-white shadow-md" style={{ backgroundColor: currentStroke }} />
               <input type="color" value={currentStroke} onChange={(e) => setStrokeColor(e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
             </label>
           )}
 
+          {/* Layer buttons */}
+          <button
+            className="w-8 h-8 rounded-full bg-gray-600 hover:bg-gray-700 text-white flex items-center justify-center shadow-md transition pointer-events-auto"
+            title="Bring to front (})"
+            onClick={handleLayerToFront}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <polyline points="17 11 12 6 7 11" />
+              <polyline points="17 18 12 13 7 18" />
+            </svg>
+          </button>
+          <button
+            className="w-8 h-8 rounded-full bg-gray-600 hover:bg-gray-700 text-white flex items-center justify-center shadow-md transition pointer-events-auto"
+            title="Bring forward (])"
+            onClick={handleLayerForward}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <polyline points="18 15 12 9 6 15" />
+            </svg>
+          </button>
+          <button
+            className="w-8 h-8 rounded-full bg-gray-600 hover:bg-gray-700 text-white flex items-center justify-center shadow-md transition pointer-events-auto"
+            title="Send backward ([)"
+            onClick={handleLayerBackward}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+          <button
+            className="w-8 h-8 rounded-full bg-gray-600 hover:bg-gray-700 text-white flex items-center justify-center shadow-md transition pointer-events-auto"
+            title="Send to back ({)"
+            onClick={handleLayerToBack}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <polyline points="7 13 12 18 17 13" />
+              <polyline points="7 6 12 11 17 6" />
+            </svg>
+          </button>
+
+          {/* Delete */}
           <button
             className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-md transition pointer-events-auto"
             title="Delete"
@@ -1921,21 +2136,21 @@ export function Canvas({
       {/* Floating context menu for selected object */}
       {floatingMenu}
 
-      {/* Remote selection name badges - positioned above selected objects */}
+      {/* Remote selection name badges - positioned above first selected object */}
       {Array.from(remoteSelections.entries()).map(([odId, selection]) => {
         const canvas = fabricRef.current;
         if (!canvas) return null;
 
-        // Don't show badge on objects the current user has selected
-        const activeObject = canvas.getActiveObject();
-        const activeObjectId = activeObject ? (activeObject as FabricObject & { id?: string }).id : null;
-        if (activeObjectId === selection.objectId) {
-          return null;
-        }
+        // Skip if all selected objects are also locally selected
+        const nonLocalIds = selection.objectIds.filter((id) => !localSelectedIds.has(id));
+        if (nonLocalIds.length === 0) return null;
+
+        // Position badge above the first object in the selection
+        const firstId = selection.objectIds[0];
 
         // Find the fabric object on the local canvas
         const obj = canvas.getObjects().find(
-          (o) => (o as FabricObject & { id?: string }).id === selection.objectId
+          (o) => (o as FabricObject & { id?: string }).id === firstId
         );
 
         if (obj) {
@@ -1967,7 +2182,7 @@ export function Canvas({
         }
 
         // Fallback: use synced remoteObjects data if fabric object not found
-        const remoteObj = remoteObjects?.get(selection.objectId);
+        const remoteObj = remoteObjects?.get(firstId);
         if (remoteObj) {
           const vpt = canvas.viewportTransform;
           const zoom = canvas.getZoom();

@@ -10,10 +10,31 @@ import {
   Timestamp,
   arrayUnion,
   getDoc,
+  writeBatch,
 } from 'firebase/firestore';
 import type { Unsubscribe, Firestore } from 'firebase/firestore';
 import { db } from './firebase';
 import type { CanvasObject, CanvasObjectProps, ShapeType } from '../types';
+
+/**
+ * Conflict Resolution: Last-Write-Wins (LWW) with Active-User-Priority
+ *
+ * Firestore uses LWW by default — the most recent write wins. On top of this,
+ * two additional guards prevent remote updates from overwriting objects the
+ * local user is actively manipulating:
+ *
+ * 1. **Canvas layer** (Canvas.tsx): The remote sync effect skips visual updates
+ *    for any object currently selected or inside an ActiveSelection.
+ *
+ * 2. **React state layer** (useRealtimeSync.ts): `activeObjectIds` ref holds
+ *    the IDs of objects the local user has selected. Incoming Firestore
+ *    `onModify` and BroadcastChannel `update` messages for those IDs are
+ *    silently dropped, so local state remains authoritative until the user
+ *    deselects.
+ *
+ * Together, these two layers ensure flicker-free manipulation while still
+ * converging once the user releases the object.
+ */
 
 // Get reference to objects collection for a room
 const getObjectsRef = (roomId: string) => {
@@ -78,6 +99,63 @@ export async function syncObjectPartial(
   }
 
   await updateDoc(objectRef, update);
+}
+
+// Atomically update multiple objects' props in a single Firestore WriteBatch.
+// All changes arrive to snapshot listeners in one callback, preventing
+// split-second inconsistency when moving a multi-object selection.
+export async function batchSyncObjectsPartial(
+  roomId: string,
+  entries: Array<{ id: string; props: Partial<CanvasObjectProps> }>,
+  userId: string
+): Promise<void> {
+  if (!db) throw new Error('Firestore not initialized');
+  const batch = writeBatch(db);
+  const now = Timestamp.now();
+
+  for (const entry of entries) {
+    const objectRef = doc(db, 'rooms', roomId, 'objects', entry.id);
+    const update: Record<string, unknown> = { updatedBy: userId, updatedAt: now };
+    for (const [key, value] of Object.entries(entry.props)) {
+      if (value !== undefined) {
+        update[`props.${key}`] = value;
+      }
+    }
+    batch.update(objectRef, update);
+  }
+
+  await batch.commit();
+}
+
+// Update only the zIndex of an object
+export async function updateObjectZIndex(
+  roomId: string,
+  objectId: string,
+  zIndex: number,
+  userId: string
+): Promise<void> {
+  if (!db) throw new Error('Firestore not initialized');
+  const objectRef = doc(db, 'rooms', roomId, 'objects', objectId);
+  const now = Timestamp.now();
+  await updateDoc(objectRef, { zIndex, updatedBy: userId, updatedAt: now });
+}
+
+// Atomically update zIndex for multiple objects in a single WriteBatch.
+export async function batchUpdateObjectZIndices(
+  roomId: string,
+  entries: Array<{ id: string; zIndex: number }>,
+  userId: string
+): Promise<void> {
+  if (!db) throw new Error('Firestore not initialized');
+  const batch = writeBatch(db);
+  const now = Timestamp.now();
+
+  for (const entry of entries) {
+    const objectRef = doc(db, 'rooms', roomId, 'objects', entry.id);
+    batch.update(objectRef, { zIndex: entry.zIndex, updatedBy: userId, updatedAt: now });
+  }
+
+  await batch.commit();
 }
 
 // Delete an object

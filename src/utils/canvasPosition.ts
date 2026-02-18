@@ -1,8 +1,19 @@
-const SNAP_SIZE = 25;
+const SNAP_SIZE = 50;
 
-/** Snap a value to the nearest grid increment (25px). */
+/** Snap a value to the nearest grid increment (50px, matching visual grid). */
 export function snapToGrid(value: number): number {
   return Math.round(value / SNAP_SIZE) * SNAP_SIZE;
+}
+
+/**
+ * Snap a position accounting for Fabric.js stroke offset.
+ * Fabric's left/top refers to the shape boundary; the stroke extends outward
+ * by strokeWidth/2. This snaps the visual outer edge to the grid, then
+ * converts back to the shape-boundary coordinate.
+ */
+export function snapToGridStrokeAware(value: number, strokeWidth: number, strokeUniform: boolean): number {
+  const strokeOffset = strokeUniform ? 0 : strokeWidth / 2;
+  return snapToGrid(value - strokeOffset) + strokeOffset;
 }
 
 interface PositionableObject {

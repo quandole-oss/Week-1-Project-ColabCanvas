@@ -1,6 +1,7 @@
 import type { CanvasObject, CanvasObjectProps, ShapeType } from '../types';
 import { executeAIAction } from './aiService';
 import type { AIAction } from './aiService';
+import type { ZIndexAction } from '../utils/zIndex';
 import { auth, db } from './firebase';
 import { collection, addDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
 
@@ -216,6 +217,31 @@ const ANTHROPIC_TOOLS = [
       required: ['items', 'x', 'y'],
     },
   },
+  {
+    name: 'duplicateObject',
+    description: 'Duplicate an existing object with a slight offset',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        objectId: { type: 'string', description: 'The ID of the object to duplicate' },
+        offsetX: { type: 'number', description: 'Horizontal offset (default 20)' },
+        offsetY: { type: 'number', description: 'Vertical offset (default 20)' },
+      },
+      required: ['objectId'],
+    },
+  },
+  {
+    name: 'reorderObject',
+    description: 'Change the layer order of an object (bring to front, send to back, etc.)',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        objectId: { type: 'string', description: 'The ID of the object to reorder' },
+        action: { type: 'string', enum: ['bringToFront', 'sendToBack', 'bringForward', 'sendBackward'], description: 'The reorder action' },
+      },
+      required: ['objectId', 'action'],
+    },
+  },
 ];
 
 interface AnthropicToolUse {
@@ -294,7 +320,8 @@ export async function processGeminiCommand(
   createObject: (type: ShapeType, props: CanvasObjectProps) => string,
   updateObject: (id: string, props: Partial<CanvasObjectProps>) => void,
   deleteObject: (id: string) => void,
-  viewportCenter: { x: number; y: number }
+  viewportCenter: { x: number; y: number },
+  reorderObject?: (id: string, action: ZIndexAction) => void
 ): Promise<string> {
   const objectSummary = Array.from(canvasObjects.entries()).map(([id, obj]) => ({
     id,
@@ -310,7 +337,7 @@ export async function processGeminiCommand(
   // Tier 1: Try direct Anthropic API (if key is configured)
   if (ANTHROPIC_API_KEY) {
     const data = await callAnthropicDirect(command, objectSummary, viewportCenter);
-    return processAPIResponse(data, canvasObjects, createObject, updateObject, deleteObject);
+    return processAPIResponse(data, canvasObjects, createObject, updateObject, deleteObject, reorderObject);
   }
 
   // Tier 2: Fall back to Firebase Cloud Function
@@ -365,7 +392,7 @@ export async function processGeminiCommand(
     });
   });
 
-  return processAPIResponse(data, canvasObjects, createObject, updateObject, deleteObject);
+  return processAPIResponse(data, canvasObjects, createObject, updateObject, deleteObject, reorderObject);
 }
 
 // Shared response processing for both direct API and Firebase paths
@@ -374,7 +401,8 @@ function processAPIResponse(
   canvasObjects: Map<string, CanvasObject>,
   createObject: (type: ShapeType, props: CanvasObjectProps) => string,
   updateObject: (id: string, props: Partial<CanvasObjectProps>) => void,
-  deleteObject: (id: string) => void
+  deleteObject: (id: string) => void,
+  reorderObject?: (id: string, action: ZIndexAction) => void
 ): string {
   if (!data.functionCalls || data.functionCalls.length === 0) {
     return data.text || "I couldn't understand that command. Try something like 'create a red circle' or 'make a sticky note'.";
@@ -391,7 +419,8 @@ function processAPIResponse(
       canvasObjects,
       createObject,
       updateObject,
-      deleteObject
+      deleteObject,
+      reorderObject
     );
     results.push(execResult.message);
   }

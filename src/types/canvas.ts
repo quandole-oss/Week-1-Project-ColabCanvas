@@ -43,7 +43,7 @@ export interface CursorState {
   userName: string;
   color: string;
   lastActive: number;
-  selectedObjectId?: string | null;
+  selectedObjectIds?: string[] | null;
   isMoving?: boolean;
 }
 

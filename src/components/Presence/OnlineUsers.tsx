@@ -18,7 +18,7 @@ export function OnlineUsers({ users, currentUserId, remoteCursors }: OnlineUsers
       <div className="flex flex-col gap-2">
         {users.map((user) => {
           const cursor = remoteCursors?.get(user.userId);
-          const isEditing = cursor?.selectedObjectId;
+          const isEditing = cursor?.selectedObjectIds && cursor.selectedObjectIds.length > 0;
 
           return (
             <div

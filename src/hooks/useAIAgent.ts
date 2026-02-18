@@ -3,6 +3,7 @@ import type { CanvasObject, CanvasObjectProps, ShapeType } from '../types';
 import { executeAIAction } from '../services/aiService';
 import type { AIAction } from '../services/aiService';
 import { isGeminiConfigured, processGeminiCommand } from '../services/geminiService';
+import type { ZIndexAction } from '../utils/zIndex';
 
 interface UseAIAgentOptions {
   canvasObjects: Map<string, CanvasObject>;
@@ -13,6 +14,7 @@ interface UseAIAgentOptions {
   getViewportCenter?: () => { x: number; y: number };
   startHistoryBatch?: () => void;
   endHistoryBatch?: () => void;
+  reorderObject?: (id: string, action: ZIndexAction) => void;
 }
 
 interface AIMessage {
@@ -29,6 +31,7 @@ export function useAIAgent({
   getViewportCenter,
   startHistoryBatch,
   endHistoryBatch,
+  reorderObject,
 }: UseAIAgentOptions) {
   const [messages, setMessages] = useState<AIMessage[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -59,7 +62,8 @@ export function useAIAgent({
               createObject,
               updateObject,
               deleteObject,
-              viewportCenter
+              viewportCenter,
+              reorderObject
             );
           } catch {
             // Cloud AI failed — fall back to local regex parser
@@ -102,7 +106,7 @@ export function useAIAgent({
         setIsProcessing(false);
       }
     },
-    [canvasObjects, createObject, updateObject, deleteObject, clearAllObjects, getViewportCenter, startHistoryBatch, endHistoryBatch]
+    [canvasObjects, createObject, updateObject, deleteObject, clearAllObjects, getViewportCenter, startHistoryBatch, endHistoryBatch, reorderObject]
   );
 
   const clearMessages = useCallback(() => {

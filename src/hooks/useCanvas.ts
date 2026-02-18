@@ -1,8 +1,8 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { Canvas, FabricObject, Line, Point, Textbox, ActiveSelection } from 'fabric';
+import { Canvas, FabricObject, Line, Point, Textbox } from 'fabric';
 import type { TPointerEventInfo, TPointerEvent } from 'fabric';
 import type { Tool, CanvasObjectProps, ShapeType } from '../types';
-import { snapToGrid, getTopLeftPosition, getAbsolutePosition as getAbsoluteTopLeftPosition } from '../utils/canvasPosition';
+import { getTopLeftPosition } from '../utils/canvasPosition';
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
@@ -172,49 +172,6 @@ export function useCanvas(
     const handleObjectModified = (opt: { target: FabricObject }) => {
       const obj = opt.target;
 
-      // Handle ActiveSelection: sync each child individually using absolute coords
-      if (obj instanceof ActiveSelection) {
-        obj.getObjects().forEach((child) => {
-          const childId = (child as FabricObject & { id?: string }).id;
-          if (childId && optionsRef.current.onObjectModified) {
-            // Use absolute position (child.left/top are group-relative inside ActiveSelection)
-            const topLeft = getAbsoluteTopLeftPosition(child);
-            // Extract effective scale from transform matrix (includes group scale)
-            const matrix = child.calcTransformMatrix();
-            const effScaleX = Math.sqrt(matrix[0] * matrix[0] + matrix[1] * matrix[1]);
-            const effScaleY = Math.sqrt(matrix[2] * matrix[2] + matrix[3] * matrix[3]);
-            const actualWidth = Math.round((child.width ?? 0) * effScaleX);
-            let actualHeight = Math.round((child.height ?? 0) * effScaleY);
-            if (child instanceof Textbox) {
-              const customType = (child as FabricObject & { customType?: string }).customType;
-              if (customType === 'sticky') {
-                const storedH = (child as any)._stickyHeight ?? 200;
-                const wasResized = effScaleY !== 1;
-                actualHeight = wasResized ? Math.round(storedH * effScaleY) : storedH;
-                (child as any)._stickyHeight = actualHeight;
-                (child as any).minWidth = Math.max(actualWidth, 40);
-              }
-            }
-            const rawRadius = (child as unknown as { radius?: number }).radius;
-            const actualRadius = rawRadius !== undefined ? Math.round(rawRadius * effScaleX) : undefined;
-            const snappedLeft = Math.round(topLeft.left);
-            const snappedTop = Math.round(topLeft.top);
-            const isSticky = child instanceof Textbox;
-            const props: CanvasObjectProps = {
-              left: snappedLeft, top: snappedTop, width: actualWidth, height: actualHeight,
-              ...(actualRadius !== undefined ? { radius: actualRadius } : {}),
-              fill: isSticky ? (child as Textbox).backgroundColor as string : child.fill as string,
-              stroke: child.stroke as string, strokeWidth: child.strokeWidth ?? 2,
-              angle: child.angle ?? 0, scaleX: 1, scaleY: 1,
-              ...(isSticky ? { textColor: child.fill as string, text: (child as Textbox).text || '', fontSize: (child as Textbox).fontSize, fontFamily: (child as Textbox).fontFamily } : {}),
-            };
-            optionsRef.current.onObjectModified(childId, props);
-          }
-        });
-        canvas.renderAll();
-        return;
-      }
-
       const id = (obj as FabricObject & { id?: string }).id;
       if (id && optionsRef.current.onObjectModified) {
         // Normalize origin to left/top (Fabric changes origin during scale operations)
@@ -242,17 +199,13 @@ export function useCanvas(
           ? Math.round(rawRadius * (obj.scaleX ?? 1))
           : undefined;
 
-        // Snap normalized position to grid
-        const snappedLeft = snapToGrid(topLeft.left);
-        const snappedTop = snapToGrid(topLeft.top);
-
         // Update fabric object to normalized state
         if (actualRadius !== undefined) {
           (obj as unknown as { radius: number }).radius = actualRadius;
         }
         obj.set({
-          left: snappedLeft,
-          top: snappedTop,
+          left: topLeft.left,
+          top: topLeft.top,
           originX: 'left',
           originY: 'top',
           width: actualWidth,
@@ -260,13 +213,17 @@ export function useCanvas(
           scaleX: 1,
           scaleY: 1,
         });
-        obj.setCoords();
-        canvas.renderAll();
+        // Defer setCoords + render to next frame so Fabric's internal cache
+        // is cleared after the browser has processed the layout change
+        requestAnimationFrame(() => {
+          obj.setCoords();
+          canvas.requestRenderAll();
+        });
 
         const isSticky = obj instanceof Textbox;
         const props: CanvasObjectProps = {
-          left: snappedLeft,
-          top: snappedTop,
+          left: topLeft.left,
+          top: topLeft.top,
           width: actualWidth,
           height: actualHeight,
           ...(actualRadius !== undefined ? { radius: actualRadius } : {}),
@@ -287,128 +244,11 @@ export function useCanvas(
       }
     };
 
-    // Throttled handler for real-time position updates during drag
-    let lastMovingUpdate = 0;
-    const handleObjectMoving = (opt: { target: FabricObject }) => {
-      const obj = opt.target;
-
-      const now = Date.now();
-      // Throttle sync updates to ~50ms (about 20 updates per second)
-      if (now - lastMovingUpdate < 50) return;
-      lastMovingUpdate = now;
-
-      // Handle ActiveSelection: sync each child individually using absolute coords
-      if (obj instanceof ActiveSelection) {
-        obj.getObjects().forEach((child) => {
-          const childId = (child as FabricObject & { id?: string }).id;
-          if (childId && optionsRef.current.onObjectModified) {
-            const topLeft = getAbsoluteTopLeftPosition(child);
-            const isSticky = child instanceof Textbox;
-            const radius = (child as unknown as { radius?: number }).radius;
-            const props: CanvasObjectProps = {
-              left: Math.round(topLeft.left), top: Math.round(topLeft.top),
-              width: child.width,
-              height: (isSticky && (child as FabricObject & { customType?: string }).customType === 'sticky') ? ((child as any)._stickyHeight ?? 200) : child.height,
-              ...(radius !== undefined ? { radius } : {}),
-              fill: isSticky ? (child as Textbox).backgroundColor as string : child.fill as string,
-              stroke: child.stroke as string, angle: child.angle,
-              scaleX: child.scaleX, scaleY: child.scaleY,
-              ...(isSticky ? { textColor: child.fill as string } : {}),
-            };
-            optionsRef.current.onObjectModified(childId, props);
-          }
-        });
-        return;
-      }
-
-      const id = (obj as FabricObject & { id?: string }).id;
-      if (id && optionsRef.current.onObjectModified) {
-        // Normalize origin to top-left for consistent sync
-        const topLeft = getTopLeftPosition(obj);
-        const isSticky = obj instanceof Textbox;
-        const radius = (obj as unknown as { radius?: number }).radius;
-        const props: CanvasObjectProps = {
-          left: Math.round(topLeft.left),
-          top: Math.round(topLeft.top),
-          width: obj.width,
-          height: (isSticky && (obj as FabricObject & { customType?: string }).customType === 'sticky')
-            ? ((obj as any)._stickyHeight ?? 200) : obj.height,
-          ...(radius !== undefined ? { radius } : {}),
-          fill: isSticky ? (obj as Textbox).backgroundColor as string : obj.fill as string,
-          stroke: obj.stroke as string,
-          angle: obj.angle,
-          scaleX: obj.scaleX,
-          scaleY: obj.scaleY,
-          ...(isSticky ? { textColor: obj.fill as string } : {}),
-        };
-        optionsRef.current.onObjectModified(id, props);
-      }
-    };
-
-    // Throttled handler for real-time updates during scaling
-    const handleObjectScaling = (opt: { target: FabricObject }) => {
-      const obj = opt.target;
-
-      const now = Date.now();
-      if (now - lastMovingUpdate < 50) return;
-      lastMovingUpdate = now;
-
-      // Handle ActiveSelection: sync each child individually using absolute coords
-      if (obj instanceof ActiveSelection) {
-        obj.getObjects().forEach((child) => {
-          const childId = (child as FabricObject & { id?: string }).id;
-          if (childId && optionsRef.current.onObjectModified) {
-            const topLeft = getAbsoluteTopLeftPosition(child);
-            const isSticky = child instanceof Textbox;
-            const radius = (child as unknown as { radius?: number }).radius;
-            const props: CanvasObjectProps = {
-              left: Math.round(topLeft.left), top: Math.round(topLeft.top),
-              width: child.width,
-              height: (isSticky && (child as FabricObject & { customType?: string }).customType === 'sticky') ? ((child as any)._stickyHeight ?? 200) : child.height,
-              ...(radius !== undefined ? { radius } : {}),
-              fill: isSticky ? (child as Textbox).backgroundColor as string : child.fill as string,
-              stroke: child.stroke as string, angle: child.angle,
-              scaleX: child.scaleX, scaleY: child.scaleY,
-              ...(isSticky ? { textColor: child.fill as string } : {}),
-            };
-            optionsRef.current.onObjectModified(childId, props);
-          }
-        });
-        return;
-      }
-
-      const id = (obj as FabricObject & { id?: string }).id;
-      if (id && optionsRef.current.onObjectModified) {
-        // Normalize origin to top-left for consistent sync
-        const topLeft = getTopLeftPosition(obj);
-        const isSticky = obj instanceof Textbox;
-        const radius = (obj as unknown as { radius?: number }).radius;
-        const props: CanvasObjectProps = {
-          left: Math.round(topLeft.left),
-          top: Math.round(topLeft.top),
-          width: obj.width,
-          height: (isSticky && (obj as FabricObject & { customType?: string }).customType === 'sticky')
-            ? ((obj as any)._stickyHeight ?? 200) : obj.height,
-          ...(radius !== undefined ? { radius } : {}),
-          fill: isSticky ? (obj as Textbox).backgroundColor as string : obj.fill as string,
-          stroke: obj.stroke as string,
-          angle: obj.angle,
-          scaleX: obj.scaleX,
-          scaleY: obj.scaleY,
-          ...(isSticky ? { textColor: obj.fill as string } : {}),
-        };
-        optionsRef.current.onObjectModified(id, props);
-      }
-    };
-
     canvas.on('mouse:down', handleMouseDown);
     canvas.on('mouse:move', handleMouseMove);
     canvas.on('mouse:up', handleMouseUp);
     canvas.on('mouse:wheel', handleWheel);
     canvas.on('object:modified', handleObjectModified);
-    canvas.on('object:moving', handleObjectMoving);
-    canvas.on('object:scaling', handleObjectScaling);
-    canvas.on('object:rotating', handleObjectMoving);
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
@@ -418,9 +258,6 @@ export function useCanvas(
       canvas.off('mouse:up', handleMouseUp);
       canvas.off('mouse:wheel', handleWheel);
       canvas.off('object:modified', handleObjectModified);
-      canvas.off('object:moving', handleObjectMoving);
-      canvas.off('object:scaling', handleObjectScaling);
-      canvas.off('object:rotating', handleObjectMoving);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -496,6 +333,13 @@ export function useCanvas(
 
 // Grid lines stored for efficient removal
 let gridLines: Line[] = [];
+
+/** Re-send all grid lines to the back of the canvas stack. Call after z-index reorders. */
+export function sendGridToBack(canvas: Canvas) {
+  for (const line of gridLines) {
+    canvas.sendObjectToBack(line);
+  }
+}
 let lastGridUpdate = 0;
 
 // Draw grid lines only within the visible viewport (+ 1 line padding)

@@ -10,6 +10,7 @@ import { usePresence } from '../../hooks/usePresence';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import { useAIAgent } from '../../hooks/useAIAgent';
 import type { CanvasObjectProps, ShapeType } from '../../types';
+import { computeNewZIndex, type ZIndexAction } from '../../utils/zIndex';
 
 interface RoomProps {
   roomId: string;
@@ -31,6 +32,10 @@ export function Room({ roomId }: RoomProps) {
   // Batch history entries for AI operations (so multiple objects undo together)
   const batchEntriesRef = useRef<HistoryEntry[]>([]);
   const isBatchingRef = useRef(false);
+  // Track AI-created object IDs for auto-selection after batch completes
+  const aiCreatedIdsRef = useRef<string[]>([]);
+  // Stored selectObjects function from Canvas
+  const selectObjectsFnRef = useRef<((ids: string[]) => void) | null>(null);
 
   if (!user) return null;
 
@@ -51,7 +56,7 @@ export function Room({ roomId }: RoomProps) {
     userColor: user.color,
   });
 
-  const { objects, isConnected, createObject, updateObject, flushPendingUpdate, removeObject, clearAllObjects, setEditingObjectId } =
+  const { objects, isConnected, createObject, createObjects, updateObject, batchUpdateObjects, flushPendingUpdate, removeObject, clearAllObjects, setEditingObjectId, updateObjectZIndex, batchUpdateObjectZIndices, setActiveObjectIds } =
     useRealtimeSync({
       roomId,
       odId: user.uid,
@@ -72,6 +77,7 @@ export function Room({ roomId }: RoomProps) {
   const startHistoryBatch = useCallback(() => {
     isBatchingRef.current = true;
     batchEntriesRef.current = [];
+    aiCreatedIdsRef.current = [];
   }, []);
 
   // End batching and commit as single undo entry
@@ -90,6 +96,11 @@ export function Room({ roomId }: RoomProps) {
         });
       }
     }
+    // Auto-select AI-created objects so the user can immediately reposition/scale
+    if (aiCreatedIdsRef.current.length > 0 && selectObjectsFnRef.current) {
+      selectObjectsFnRef.current(aiCreatedIdsRef.current);
+    }
+    aiCreatedIdsRef.current = [];
     batchEntriesRef.current = [];
   }, []);
 
@@ -99,6 +110,7 @@ export function Room({ roomId }: RoomProps) {
       const id = uuidv4();
       objectCountRef.current++;
       createObject(id, type, props, objectCountRef.current);
+      aiCreatedIdsRef.current.push(id);
       // Add to history for undo support
       addHistoryEntry({
         type: 'create',
@@ -150,6 +162,15 @@ export function Room({ roomId }: RoomProps) {
     [objects, removeObject, addHistoryEntry]
   );
 
+  const aiReorderObject = useCallback(
+    (id: string, action: ZIndexAction) => {
+      const objectList = Array.from(objects.values()).map((o) => ({ id: o.id, zIndex: o.zIndex }));
+      const newZIndex = computeNewZIndex(objectList, id, action);
+      updateObjectZIndex(id, newZIndex);
+    },
+    [objects, updateObjectZIndex]
+  );
+
   const { messages, isProcessing, processCommand } = useAIAgent({
     canvasObjects: objects,
     createObject: aiCreateObject,
@@ -159,6 +180,7 @@ export function Room({ roomId }: RoomProps) {
     getViewportCenter: getViewportCenter || undefined,
     startHistoryBatch,
     endHistoryBatch,
+    reorderObject: aiReorderObject,
   });
 
   const handleObjectCreated = useCallback(
@@ -168,11 +190,25 @@ export function Room({ roomId }: RoomProps) {
     [createObject]
   );
 
+  const handleObjectsCreated = useCallback(
+    (objects: { id: string; type: ShapeType; props: CanvasObjectProps; zIndex: number }[]) => {
+      createObjects(objects);
+    },
+    [createObjects]
+  );
+
   const handleObjectModified = useCallback(
     (id: string, props: CanvasObjectProps) => {
       updateObject(id, props);
     },
     [updateObject]
+  );
+
+  const handleObjectsBatchModified = useCallback(
+    (entries: Array<{ id: string; props: CanvasObjectProps }>) => {
+      batchUpdateObjects(entries);
+    },
+    [batchUpdateObjects]
   );
 
   const handleObjectDeleted = useCallback(
@@ -182,9 +218,23 @@ export function Room({ roomId }: RoomProps) {
     [removeObject]
   );
 
+  const handleObjectZIndexChanged = useCallback(
+    (id: string, zIndex: number) => {
+      updateObjectZIndex(id, zIndex);
+    },
+    [updateObjectZIndex]
+  );
+
+  const handleObjectsZIndexChanged = useCallback(
+    (entries: Array<{ id: string; zIndex: number }>) => {
+      batchUpdateObjectZIndices(entries);
+    },
+    [batchUpdateObjectZIndices]
+  );
+
   const handleCursorMove = useCallback(
-    (x: number, y: number, selectedObjectId?: string | null, isMoving?: boolean) => {
-      broadcastCursor(x, y, selectedObjectId, isMoving);
+    (x: number, y: number, selectedObjectIds?: string[] | null, isMoving?: boolean) => {
+      broadcastCursor(x, y, selectedObjectIds, isMoving);
     },
     [broadcastCursor]
   );
@@ -235,13 +285,19 @@ export function Room({ roomId }: RoomProps) {
           roomId={roomId}
           userId={user.uid}
           onObjectCreated={handleObjectCreated}
+          onObjectsCreated={handleObjectsCreated}
           onObjectModified={handleObjectModified}
+          onObjectsBatchModified={handleObjectsBatchModified}
           onFlushSync={flushPendingUpdate}
           onEditingObjectChange={setEditingObjectId}
           onObjectDeleted={handleObjectDeleted}
           onCursorMove={handleCursorMove}
           onViewportCenterChange={(fn) => setGetViewportCenter(() => fn)}
           onHistoryAddChange={(fn) => { addToHistoryRef.current = fn; }}
+          onObjectZIndexChanged={handleObjectZIndexChanged}
+          onObjectsZIndexChanged={handleObjectsZIndexChanged}
+          onSelectObjectsReady={(fn) => { selectObjectsFnRef.current = fn; }}
+          onActiveObjectsChange={setActiveObjectIds}
           remoteCursors={remoteCursors}
           remoteObjects={objects}
         />
