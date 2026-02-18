@@ -117,9 +117,9 @@ export function subscribeToPresence(
 
 // Create a room if it doesn't exist, or add user to existing room
 export async function ensureRoom(
-  roomId: string,
-  userId: string,
-  roomName?: string
+  _roomId: string,
+  _userId: string,
+  _roomName?: string
 ): Promise<void> {
   // This is handled in canvasSync.ts — kept here for compatibility
 }

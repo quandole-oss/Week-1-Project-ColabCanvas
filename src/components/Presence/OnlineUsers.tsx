@@ -9,7 +9,7 @@ interface OnlineUsersProps {
   debugError?: string | null;
 }
 
-export function OnlineUsers({ users, currentUserId, remoteCursors, presenceConnected, debugError }: OnlineUsersProps) {
+export function OnlineUsers({ users, currentUserId, remoteCursors }: OnlineUsersProps) {
   return (
     <div className="bg-white/70 backdrop-blur-md rounded-xl p-3 shadow-lg border border-white/20">
       <h3 className="text-xs text-gray-500 mb-2 uppercase tracking-wide font-medium">

@@ -1,169 +1,385 @@
-4# Collaborative Canvas — Architecture Plan
+# Architecture Design Record — Collaborative Canvas
 
-## 1. Overview
+---
 
-A real-time collaborative whiteboard built with **React 19**, **TypeScript**, **Fabric.js**, and **Firebase**. Multiple users can draw shapes on a shared canvas, see each other's cursors and selections in real time, and use an AI assistant to create objects via natural language.
+## 1. System Architecture Diagrams
 
-The app runs in two modes:
-- **Firebase mode** — full multi-device real-time sync via Firestore + Realtime Database
-- **Demo mode** — cross-tab sync via BroadcastChannel (no backend required)
+### High-Level System Flow
+
+```mermaid
+flowchart TB
+    subgraph Frontend["Frontend (React 19 + Vite)"]
+        UI["UI Components<br/>Canvas / Toolbar / Auth / AI Panel"]
+        Hooks["Custom Hooks Layer<br/>useCanvas · useRealtimeSync<br/>usePresence · useCursorSync · useAIAgent"]
+        FabricJS["Fabric.js 7.1<br/>Canvas Rendering Engine"]
+        UI --> Hooks
+        Hooks --> FabricJS
+    end
+
+    subgraph Firebase["Firebase Backend"]
+        Auth["Firebase Auth<br/>Google OAuth · Email/Pass · Demo"]
+        Firestore["Cloud Firestore<br/>rooms/ · objects/ · aiRequests/"]
+        RTDB["Realtime Database<br/>cursors/ · presence/"]
+        Functions["Cloud Functions (Node 20)<br/>AI Proxy · Room Cleanup"]
+        Hosting["Firebase Hosting<br/>Static SPA + Security Headers"]
+    end
+
+    subgraph External["External Services"]
+        Claude["Anthropic Claude API<br/>claude-sonnet-4-5"]
+    end
+
+    Hooks -- "Auth state" --> Auth
+    Hooks -- "Canvas objects (persistent)" --> Firestore
+    Hooks -- "Cursors & presence (ephemeral)" --> RTDB
+    Hooks -- "AI requests (write)" --> Firestore
+    Firestore -- "onDocumentCreated trigger" --> Functions
+    Functions -- "Tool-use API call" --> Claude
+    Claude -- "Function calls (createShape, etc.)" --> Functions
+    Functions -- "Write result back" --> Firestore
+    Firestore -- "onSnapshot listener" --> Hooks
+```
+
+### Real-Time Object Sync Flow
+
+```mermaid
+flowchart LR
+    A["User draws shape"] --> B["Optimistic local update"]
+    B --> C["Throttle 50ms / Debounce 100ms"]
+    C --> D["Firestore setDoc merge"]
+    D --> E["onSnapshot fires for all clients"]
+    E --> F["Echo filter: skip if localPendingUpdate"]
+    F --> G["Render remote change on Fabric canvas"]
+```
+
+### Cursor Sync Flow
+
+```mermaid
+flowchart LR
+    H["Mouse move"] --> I["Throttle 50ms"]
+    I --> J["RTDB write: cursors/roomId/userId"]
+    J --> K["onValue listener (all clients)"]
+    K --> L["Filter stale > 5s, exclude self"]
+    L --> M["CursorOverlay renders with CSS transitions"]
+```
 
 ---
 
 ## 2. Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Framework | React 19 + TypeScript 5.9 |
-| Build | Vite 7 |
-| Styling | Tailwind CSS 4 |
-| Canvas | Fabric.js 7 |
-| Backend | Firebase (Auth, Firestore, Realtime Database) |
-| Routing | React Router DOM 7 |
-| IDs | uuid v13 |
+| Layer | Technology | Version |
+|---|---|---|
+| Framework | React + TypeScript | 19.2 / 5.9 |
+| Build | Vite | 7.2 |
+| Styling | Tailwind CSS | 4.1 |
+| Canvas | Fabric.js | 7.1 |
+| Backend | Firebase (Auth, Firestore, RTDB, Functions, Hosting) | 12.8 |
+| AI (Primary) | Anthropic Claude API (via Cloud Functions) | claude-sonnet-4-5 |
+| AI (Alt) | Google Generative AI (Gemini) | 0.24 |
+| Routing | React Router DOM | 7.13 |
+| IDs | uuid | 13.0 |
+| Testing | Vitest | 3.2 |
+| Linting | ESLint + TypeScript ESLint | 9.39 / 8.46 |
 
 ---
 
 ## 3. Project Structure
 
 ```
-src/
-├── main.tsx                          # ReactDOM entry point
-├── App.tsx                           # Router + AuthProvider + route guards
-├── index.css                         # Tailwind imports
+collaborative-canvas/
+├── src/
+│   ├── main.tsx                          # React DOM entry point
+│   ├── App.tsx                           # Router, AuthProvider, route guards
+│   ├── index.css                         # Tailwind imports + global styles
+│   │
+│   ├── types/
+│   │   ├── canvas.ts                     # CanvasObject, ShapeType, Tool, Room, CursorState
+│   │   ├── user.ts                       # User, PresenceData
+│   │   ├── ai.ts                         # AITool, AIMessage, AICommandResult
+│   │   └── index.ts                      # Re-exports
+│   │
+│   ├── utils/
+│   │   ├── colors.ts                     # USER_COLORS palette, SHAPE_COLORS, color selection
+│   │   ├── throttle.ts                   # throttle() and debounce() with flush()
+│   │   ├── index.ts                      # Re-exports
+│   │   ├── colors.test.ts               # Color utility tests
+│   │   └── throttle.test.ts             # Throttle/debounce tests
+│   │
+│   ├── services/
+│   │   ├── firebase.ts                   # Firebase app init, config, service exports
+│   │   ├── canvasSync.ts                 # Firestore CRUD for canvas objects
+│   │   ├── cursorSync.ts                 # RTDB cursor position syncing
+│   │   ├── presenceSync.ts              # RTDB online presence management
+│   │   ├── aiService.ts                  # AI_TOOLS definitions, action parsing/execution
+│   │   ├── geminiService.ts              # Gemini API wrapper for AI commands
+│   │   ├── aiService.test.ts            # AI action execution tests
+│   │   └── index.ts                      # Re-exports
+│   │
+│   ├── hooks/
+│   │   ├── useAuth.tsx                   # AuthContext provider, auth state management
+│   │   ├── useCanvas.ts                  # Fabric.js initialization, zoom, pan, grid
+│   │   ├── useRealtimeSync.ts           # Canvas object sync (Firestore/BroadcastChannel)
+│   │   ├── usePresence.ts               # Online user presence tracking
+│   │   ├── useCursorSync.ts             # Remote cursor broadcasting
+│   │   ├── useAIAgent.ts                # AI command processing pipeline
+│   │   └── index.ts                      # Re-exports
+│   │
+│   ├── components/
+│   │   ├── Auth/
+│   │   │   ├── LoginForm.tsx            # Email/password, Google, demo login UI
+│   │   │   ├── UserAvatar.tsx           # User avatar with initials/photo + color
+│   │   │   └── index.ts
+│   │   ├── Canvas/
+│   │   │   ├── Canvas.tsx               # Core drawing engine (~1700 lines)
+│   │   │   ├── CanvasToolbar.tsx        # Tool buttons, color pickers, zoom controls
+│   │   │   ├── CursorOverlay.tsx        # Remote cursor rendering with labels
+│   │   │   └── index.ts
+│   │   ├── Presence/
+│   │   │   ├── OnlineUsers.tsx          # Online user list with editing status
+│   │   │   └── index.ts
+│   │   ├── AI/
+│   │   │   ├── AICommandInput.tsx       # Floating AI chat panel + input
+│   │   │   └── index.ts
+│   │   └── Layout/
+│   │       ├── Home.tsx                 # Room lobby: create/join interface
+│   │       ├── Room.tsx                 # Workspace: orchestrates hooks/components
+│   │       └── index.ts
+│   │
+│   ├── test/
+│   │   └── setup.ts                     # Test environment setup
+│   │
+│   └── assets/
+│       └── react.svg
 │
-├── types/
-│   ├── ai.ts                        # AITool, AIMessage, AICommandResult
-│   ├── canvas.ts                    # CanvasObject, CursorState, Room, Tool, ShapeType
-│   └── user.ts                      # User, PresenceData
+├── functions/                            # Cloud Functions backend
+│   └── src/
+│       └── index.ts                     # AI proxy + room cleanup functions
 │
-├── utils/
-│   ├── colors.ts                    # User color palette, shape default colors
-│   └── throttle.ts                  # throttle() and debounce() helpers
-│
-├── services/
-│   ├── firebase.ts                  # Firebase app init, auth, db, rtdb exports
-│   ├── canvasSync.ts                # Firestore CRUD for canvas objects
-│   ├── cursorSync.ts                # RTDB read/write for cursor positions
-│   ├── presenceSync.ts             # RTDB read/write for online presence
-│   └── aiService.ts                 # Local NLP parser + action executor
-│
-├── hooks/
-│   ├── useAuth.tsx                  # AuthContext provider + consumer
-│   ├── useCanvas.ts                 # Fabric.js canvas lifecycle, zoom, pan, grid
-│   ├── useRealtimeSync.ts          # Object sync (Firestore or BroadcastChannel)
-│   ├── usePresence.ts              # Online user tracking
-│   ├── useCursorSync.ts            # Remote cursor broadcasting
-│   └── useAIAgent.ts               # AI command processing + history batching
-│
-└── components/
-    ├── Auth/
-    │   ├── LoginForm.tsx            # Email/password, Google OAuth, or demo login
-    │   └── UserAvatar.tsx           # Initials/photo avatar with color
-    ├── Canvas/
-    │   ├── Canvas.tsx               # Core canvas: drawing, selection, sync, history (~1700 lines)
-    │   ├── CanvasToolbar.tsx        # Tool buttons, color pickers, zoom, undo/redo
-    │   └── CursorOverlay.tsx        # Remote cursor rendering (rAF-driven)
-    ├── Presence/
-    │   └── OnlineUsers.tsx          # Online user list with editing status
-    ├── AI/
-    │   └── AICommandInput.tsx       # Floating AI chat panel + quick commands
-    └── Layout/
-        ├── Home.tsx                 # Room lobby: create/join rooms
-        └── Room.tsx                 # Workspace: assembles canvas, presence, AI, header
+├── Configuration:
+│   ├── vite.config.ts                   # Vite build (React plugin, Tailwind, Vitest)
+│   ├── tsconfig.app.json               # TS strict mode, ES2022 target
+│   ├── eslint.config.js                # ESLint + React hooks rules
+│   ├── firebase.json                   # Firestore, RTDB, Functions, Hosting config
+│   ├── firestore.rules                 # Firestore security rules
+│   ├── database.rules.json            # Realtime Database security rules
+│   ├── firestore.indexes.json         # Firestore index definitions
+│   └── .env.local                      # Firebase credentials (not committed)
 ```
 
 ---
 
-## 4. Architecture Diagram
+## 4. Frontend Rationale
+
+### State Management: Hooks-per-Domain (no Redux/Zustand)
+
+**Choice:** Each custom hook owns one domain of state — `useAuth` for auth, `useRealtimeSync` for canvas objects, `useCursorSync` for cursors, `usePresence` for online users, `useAIAgent` for AI chat. `Room.tsx` wires them together.
+
+| State Domain | Storage | Location |
+|---|---|---|
+| Auth | React Context | `useAuth()` context provider |
+| Canvas Objects | `Map<id, CanvasObject>` | `useRealtimeSync()` state |
+| Fabric.js Instance | useRef | `useCanvas()` hook ref |
+| Cursor Positions | `Map<userId, CursorState>` | `useCursorSync()` state |
+| Presence (online users) | `PresenceData[]` | `usePresence()` state |
+| Undo/Redo History | useRef `HistoryEntry[]` | `Canvas.tsx` component ref |
+| AI Messages | `AIMessage[]` | `useAIAgent()` state |
+| UI State (tools, colors, zoom) | Local state | `useCanvas()` state |
+
+**Why this over Redux/Zustand:**
+- The domains are **naturally isolated** — cursor state never needs to read auth state, presence never reads canvas objects. Cross-cutting concerns are minimal.
+- Firebase listeners already act as the "single source of truth." Adding a client-side store on top would create a **dual-source-of-truth problem** where you'd need to keep Firestore and Redux in sync.
+- The app has ~6 state domains with clear ownership. Redux becomes valuable at ~15+ domains with heavy cross-domain reads. This app doesn't hit that threshold.
+
+**Trade-off:** `Room.tsx` becomes a wiring hub (~200 lines of prop-passing). If the number of hooks doubled, this orchestrator would become unwieldy and a state library would become justified.
+
+### Component Structure: Feature-Based Folders
+
+**Choice:** `components/Auth/`, `components/Canvas/`, `components/Presence/`, `components/AI/`, `components/Layout/` — each folder owns its UI.
+
+**Why:** Matches the hook domains 1:1. A developer working on cursors touches `useCursorSync` + `CursorOverlay` — no file-hunting across a flat directory. The Canvas component is large (~1700 lines) because it manages the full Fabric.js lifecycle, drawing, selection, undo/redo, and remote sync rendering in one place.
+
+### Component Hierarchy
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         App.tsx                                  │
-│  BrowserRouter → AuthProvider → ProtectedRoute                  │
-│    /login → LoginForm                                           │
-│    /      → Home                                                │
-│    /room/:roomId → Room                                         │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                    ┌──────▼──────┐
-                    │   Room.tsx   │  Orchestrates all hooks + components
-                    └──┬──┬──┬──┬─┘
-          ┌────────────┘  │  │  └────────────┐
-          ▼               ▼  ▼               ▼
-   useRealtimeSync  usePresence  useCursorSync  useAIAgent
-          │               │          │              │
-          ▼               ▼          ▼              │
-   ┌────────────┐  ┌──────────┐ ┌─────────┐       │
-   │ canvasSync │  │ presence │ │ cursor  │       │
-   │ (Firestore)│  │  Sync    │ │  Sync   │       │
-   │            │  │  (RTDB)  │ │  (RTDB) │       │
-   └─────┬──────┘  └────┬─────┘ └────┬────┘       │
-         └───────────────┼────────────┘            │
-                         ▼                         ▼
-                    ┌──────────┐            ┌──────────┐
-                    │ Firebase │            │ aiService│
-                    │ Backend  │            │ (local)  │
-                    └──────────┘            └──────────┘
-
-    ┌─────────────────────────────────────────────────────┐
-    │                     Canvas.tsx                        │
-    │  Fabric.js instance ← useCanvas hook                 │
-    │  ┌────────────────┐  ┌────────────┐  ┌───────────┐ │
-    │  │ Drawing engine  │  │ History    │  │ Remote    │ │
-    │  │ (mouse events)  │  │ (undo/redo)│  │ sync      │ │
-    │  └────────────────┘  └────────────┘  └───────────┘ │
-    │  ┌────────────────┐  ┌────────────┐                 │
-    │  │ Selection       │  │ Eraser     │                 │
-    │  │ highlights      │  │ tool       │                 │
-    │  └────────────────┘  └────────────┘                 │
-    └─────────────────────────────────────────────────────┘
+App.tsx (Router + AuthProvider)
+├── LoginForm.tsx (unauthenticated)
+├── Home.tsx (room lobby)
+│   └── UserAvatar.tsx
+└── Room.tsx (workspace orchestrator)
+    ├── Canvas.tsx
+    │   ├── CanvasToolbar.tsx
+    │   └── CursorOverlay.tsx
+    ├── OnlineUsers.tsx
+    │   └── UserAvatar.tsx (per user)
+    └── AICommandInput.tsx
 ```
+
+### Real-Time Sync: Firebase Listeners (not WebSockets)
+
+**Choice:** Firestore `onSnapshot` for persistent data, Realtime Database `onValue` for ephemeral data. No raw WebSocket server.
+
+**Why this over a custom WebSocket server:**
+- **Zero server management.** Firebase handles connection lifecycle, reconnection, offline queuing, and scaling automatically.
+- **Built-in persistence.** Firestore snapshots are both the real-time channel AND the database. A WebSocket server would need a separate persistence layer.
+- **Conflict resolution for free.** Firestore's `setDoc({ merge: true })` provides last-write-wins without building a custom CRDT or OT system.
+
+**Why split Firestore + RTDB:**
+- Canvas objects need **persistence and querying** → Firestore (document model, offline cache, security rules).
+- Cursor positions are **high-frequency, ephemeral, disposable** → RTDB (lower latency, cheaper writes, auto-cleanup on disconnect via `onDisconnect()`).
+
+**Trade-off:** Last-write-wins means if two users resize the same shape simultaneously, one update is lost. For a whiteboard this is acceptable — shapes are quick to re-adjust. For a document editor, this would require OT/CRDT.
+
+### Demo Mode: BroadcastChannel Fallback
+
+**Choice:** When Firebase is unconfigured, the app uses the browser's `BroadcastChannel` API for cross-tab sync.
+
+**Why:** Enables local development and demos without any backend setup. A developer can `npm run dev` and open two tabs to test collaboration instantly. The same hook interfaces are used, so the code paths are identical — only the transport layer changes.
+
+| Feature | Firebase Mode | Demo Mode |
+|---|---|---|
+| Object sync | Firestore snapshot listeners | BroadcastChannel `canvas-room-{id}` |
+| Cursor sync | RTDB listeners + onDisconnect | BroadcastChannel `canvas-cursors-{id}` |
+| Presence | RTDB listeners + onDisconnect | BroadcastChannel `canvas-presence-{id}` + heartbeat |
+| Auth | Firebase Auth (Google/email) | Local demo user object |
+| Disconnect | Firebase onDisconnect handlers | Heartbeat timeout (6s) |
+
+### Routing
+
+```
+/login         → LoginForm (public, redirects to / if authenticated)
+/              → Home (protected) — room lobby
+/room/:roomId  → Room (protected) — canvas workspace
+*              → redirect to /
+```
+
+`ProtectedRoute` wrapper checks `useAuth()` — redirects to `/login` if no user.
 
 ---
 
-## 5. Data Flow
+## 5. Backend Rationale
 
-### 5.1 Authentication
+### API Design: No REST/GraphQL — Firestore as the API
+
+**Choice:** There is no traditional API server. The client reads/writes Firestore documents directly. Cloud Functions are triggered reactively (not called via HTTP).
+
+**Why:**
+- For real-time collaborative data, a request-response API adds unnecessary latency. Firestore's listener model means clients get updates **pushed** to them within ~100-300ms.
+- Security is enforced via **Firestore Security Rules** (declarative, per-document ACLs) rather than middleware. Rules validate that: only room members can write objects, users can only modify their own presence, AI requests are scoped to members.
+- The only server-side logic needed is the AI proxy (to keep the Anthropic API key secret) and room cleanup (cascade-delete subcollections). These are event-triggered Cloud Functions, not REST endpoints.
+
+**Trade-off:** Complex business logic is harder to express in Firestore Security Rules than in server middleware. If the app needed multi-step transactions (e.g., "move object only if user has edit permission AND object isn't locked"), a server API would be cleaner.
+
+### Database Schema
+
+#### Firestore
 
 ```
-LoginForm → Firebase Auth (Google/email) or Demo user
-         → onAuthStateChanged listener
-         → AuthContext sets { user, isDemo }
-         → Color assigned (random, persisted in localStorage)
+rooms/{roomId}
+  ├── id: string
+  ├── name: string
+  ├── createdBy: string (uid)
+  ├── createdAt: Timestamp
+  ├── members: string[] (uids)
+  └── isPublic?: boolean
+
+rooms/{roomId}/objects/{objectId}
+  ├── id: string
+  ├── type: ShapeType ('rect'|'circle'|'line'|'triangle'|'star'|'hexagon'|'sticky'|'textbox')
+  ├── props: CanvasObjectProps
+  │     ├── left, top: number
+  │     ├── width?, height?, radius?: number
+  │     ├── fill?, stroke?: string
+  │     ├── strokeWidth?: number
+  │     ├── angle?, scaleX?, scaleY?: number
+  │     ├── text?, fontSize?, fontFamily?, textColor?: string
+  │     └── x1?, y1?, x2?, y2?: number (line endpoints)
+  ├── zIndex: number
+  ├── createdBy / updatedBy: string (uid)
+  └── createdAt / updatedAt: Timestamp
+
+rooms/{roomId}/aiRequests/{requestId}
+  ├── command: string (≤500 chars)
+  ├── canvasObjects: CanvasObject[] (summary)
+  ├── viewportCenter: {x, y}
+  ├── userId: string
+  ├── status: 'pending' | 'processing' | 'completed' | 'error'
+  ├── createdAt: Timestamp
+  ├── result?: { functionCalls: [...], text: string }
+  ├── error?: string
+  └── completedAt?: Timestamp
 ```
 
-### 5.2 Room Entry
+#### Realtime Database
 
 ```
-Navigate to /room/:roomId
-  → useRealtimeSync: ensureRoom() + subscribeToObjects()
-  → usePresence:     setUserOnline() + subscribeToPresence()
-  → useCursorSync:   setupCursorCleanup() + subscribeToCursors()
+cursors/{roomId}/{userId}
+  ├── x, y: number
+  ├── userId, userName, color: string
+  ├── lastActive: number (Date.now())
+  ├── selectedObjectId?: string
+  └── isMoving?: boolean
+
+presence/{roomId}/{userId}
+  ├── userId, userName, color: string
+  ├── online: boolean
+  └── lastSeen: ServerTimestamp
 ```
 
-### 5.3 Drawing an Object
+**Why subcollections for objects?** Each object is a separate document so individual updates don't rewrite the entire room state. Write costs stay proportional to change size. A single `onSnapshot` subscription gets all objects for a room.
+
+**Why AI requests as documents?** Client writes a request → Cloud Function triggers → writes result back → client's `onSnapshot` picks it up. Reuses the existing real-time pipeline with no separate HTTP endpoint, CORS config, or polling logic.
+
+### Auth & Data Validation
+
+**Authentication strategies:**
+1. **Google OAuth 2.0** — via Firebase Auth popup
+2. **Email/Password** — traditional auth with `createUserWithEmailAndPassword`
+3. **Demo Mode** — no authentication, temporary user via `signInAsDemo(name)`
+
+User color is assigned randomly on first login and persisted in `localStorage` (`user_color_{uid}`).
+
+**Validation layers:**
+1. **Firestore Security Rules** — structural validation (field types, required fields, member-only writes)
+2. **Cloud Function validation** — AI requests: command length ≤500 chars, rate limit 10 req/min/user, object ID pattern validation
+3. **Client-side** — TypeScript types at compile time; runtime checks on drawing (min 5px size, origin normalization)
+
+### Cloud Functions
+
+**AI Proxy (`onDocumentCreated` on `rooms/{roomId}/aiRequests/{requestId}`):**
+1. Idempotency guard: skip if status != 'pending'
+2. Validate command length, rate limit, sanitize object IDs
+3. Call Anthropic Claude API with 7 tool definitions (createShape, moveObject, resizeObject, rotateObject, deleteObject, arrangeObjects, createLoginForm, createNavigationBar)
+4. Parse tool_use response blocks, write result back to Firestore
+5. 30s timeout via AbortController
+
+**Room Cleanup (`onDocumentDeleted` on `rooms/{roomId}`):**
+- Cascade-delete subcollections (objects, aiRequests) in batches of 100
+
+---
+
+## 6. Data Flow Details
+
+### Drawing an Object
 
 ```
 1. User selects shape tool (toolbar)
-2. mousedown  → create temporary Fabric object
+2. mousedown  → create temporary Fabric object at pointer
 3. mousemove  → resize via drag
 4. mouseup    → finalize:
    a. Validate min 5px size (sticky notes always valid)
-   b. Normalize origin to top-left
+   b. Normalize origin to top-left via getTopLeftPosition()
    c. Generate UUID
-   e. onObjectCreated(id, type, props, zIndex) → Room
-   f. Add HistoryEntry (type: 'create')
-   g. Auto-select, switch to select tool
+   d. onObjectCreated(id, type, props, zIndex) → Room
+   e. Add HistoryEntry (type: 'create')
+   f. Auto-select, switch to select tool
 5. Room → useRealtimeSync.createObject()
    a. Optimistic: update local Map<id, CanvasObject> immediately
-   b. Async:     syncObject() writes to Firestore
+   b. Async: syncObject() writes to Firestore
    c. Track in localPendingUpdates to ignore echo
 6. Remote users → subscribeToObjects() fires
    → Canvas receives remoteObjects → creates Fabric objects
 ```
 
-### 5.4 Object Modification (drag/resize/rotate)
+### Object Modification
 
 ```
 1. mousedown → capture initial props (beforeModifyRef)
@@ -175,134 +391,52 @@ Navigate to /room/:roomId
    → Final sync call
 ```
 
-### 5.5 Cursor Sync
-
-```
-mousemove on canvas
-  → onCursorMove(x, y) throttled 50ms
-  → useCursorSync.broadcastCursor()
-  → Firebase RTDB: cursors/{roomId}/{userId}
-  ── or BroadcastChannel in demo mode
-
-Remote:
-  subscribeToCursors() → filter own + stale (>5s)
-  → CursorOverlay: rAF loop converts world→screen coords
-  → Render SVG arrow + name label with 75ms transition
-```
-
-### 5.6 Selection Broadcasting
-
-```
-selection:created → onCursorMove(x, y, objectId, false)  [immediate, not throttled]
-  → Remote receives selectedObjectId in CursorState
-  → Canvas applies 4px colored stroke highlight (if object stable)
-  → Renders name badge above object
-
-object:moving → onCursorMove(x, y, objectId, true)  [isMoving=true]
-  → Remote hides selection outline during drag
-
-mouseup → isMoving=false → outline reappears
-
-Heartbeat every 2s keeps selection alive even when idle
-```
-
-### 5.7 AI Commands
+### AI Command Processing
 
 ```
 User types "create 3 red circles at center"
   → useAIAgent.processCommand()
   → startHistoryBatch()
-  → processLocalCommand():
-     - Regex extracts: count=3, color=red, shape=circle, position=center
-     - Generates 3 createObject calls with offset positions
-  → endHistoryBatch() wraps in single batch HistoryEntry
-  → Single Ctrl+Z undoes all 3 circles
+  → Cloud Function path: write aiRequest doc → Claude API → result doc
+     OR local fallback: regex parser extracts count, color, shape, position
+  → Execute actions (createObject calls with offset positions)
+  → endHistoryBatch() → single batch HistoryEntry
+  → Single Ctrl+Z undoes all created objects
 ```
 
 ---
 
-## 6. Firebase Data Model
+## 7. Canvas Engine (Fabric.js)
 
-### Firestore
+- **Virtual size:** Infinite (unbounded in all directions)
+- **Zoom range:** 0.1x – 5x (mousewheel zooms toward pointer)
+- **Grid:** Dynamic 50px lines, viewport-only rendering
+- **Pan:** Space+drag, middle mouse, or pan tool
 
-```
-rooms/{roomId}
-  ├── name: string
-  ├── createdBy: string (uid)
-  ├── createdAt: Timestamp
-  ├── members: string[] (uids)
-  └── isPublic?: boolean
+### Shape Support
 
-rooms/{roomId}/objects/{objectId}
-  ├── id: string
-  ├── type: ShapeType
-  ├── props: CanvasObjectProps
-  ├── zIndex: number
-  ├── createdBy / updatedBy: string
-  └── createdAt / updatedAt: Timestamp
-```
+| Shape | Fabric Type | Notes |
+|---|---|---|
+| rect | Rect | Standard rectangle |
+| circle | Circle | Uses radius prop |
+| line | Line | x1/y1/x2/y2 endpoints |
+| triangle | Triangle | Standard triangle |
+| hexagon | Polygon | 6-point generated polygon |
+| star | Polygon | 10-point generated star |
+| sticky | Textbox | 200x200 yellow note with editable text |
+| textbox | Textbox | Free-form editable text |
 
-### Realtime Database
+### Interaction Modes
 
-```
-cursors/{roomId}/{userId}
-  ├── x, y: number
-  ├── userId, userName, color: string
-  ├── lastActive: number (timestamp)
-  ├── selectedObjectId?: string
-  └── isMoving?: boolean
+| Mode | Cursor | Behavior |
+|---|---|---|
+| Select | Default/move | Click to select, drag to move, handles to scale/rotate |
+| Drawing tools | Crosshair | Click-drag to draw, disables selection |
+| Pan | Grab | Click-drag to pan viewport |
+| Eraser | Crosshair | Click objects to delete |
+| Spacebar+drag | Grab | Temporary pan, returns to previous tool |
 
-presence/{roomId}/{userId}
-  ├── userId, userName, color: string
-  ├── online: boolean
-  └── lastSeen: ServerTimestamp
-```
-
-**Why the split?** Firestore for persistent canvas data (ordered queries, complex documents). RTDB for ephemeral high-frequency data (cursor positions, presence) where low latency and onDisconnect handlers matter.
-
----
-
-## 7. State Management Strategy
-
-| Concern | Approach |
-|---|---|
-| Auth | React Context (AuthProvider) |
-| Canvas objects | `Map<string, CanvasObject>` in useRealtimeSync, passed as prop |
-| Fabric.js instance | useCanvas hook, stored in ref |
-| Cursor positions | `Map<string, CursorState>` in useCursorSync |
-| Presence | `PresenceData[]` in usePresence |
-| Undo/Redo | Ref-based stack in Canvas.tsx (max 50 entries) |
-| AI conversation | `AIMessage[]` state in useAIAgent |
-| UI state (tool, colors, zoom) | Local state in useCanvas |
-
-No external state library. Each hook owns its domain. Room.tsx wires them together via props and callbacks.
-
----
-
-## 8. Real-Time Collaboration Design
-
-### Conflict Resolution
-- **Last write wins** via Firestore `setDoc({ merge: true })`
-- Optimistic local updates, echo prevention via `localPendingUpdates` ref
-
-### Presence Lifecycle
-- `setUserOnline()` on room mount with `onDisconnect` handler
-- `setUserOffline()` on unmount
-- Firebase handles abrupt disconnection automatically
-
-### Cursor Lifecycle
-- Broadcast at 50ms throttle (position) or immediately (selection change)
-- `onDisconnect` removes cursor from RTDB
-- Stale detection: ignore cursors older than 5 seconds
-
-### Demo Mode Equivalent
-- `BroadcastChannel` per feature: `canvas-room-{id}`, `canvas-presence-{id}`, `canvas-cursors-{id}`
-- Heartbeat/stale cleanup intervals replace `onDisconnect`
-- New tabs request full state sync on mount
-
----
-
-## 9. History / Undo System
+### History / Undo System
 
 ```
 HistoryEntry =
@@ -312,12 +446,11 @@ HistoryEntry =
   | { type: 'batch',   entries: HistoryEntry[] }
 ```
 
-- **Max depth**: 50 entries (FIFO eviction)
-- **Redo**: Cleared on any new action
-- **Batch**: AI operations group multiple creates into one undoable action
-- **Pending deletion tracking**: `pendingDeletionRef` prevents race conditions where undo recreates an object that remote sync also recreates
+- **Max depth:** 50 entries (FIFO eviction)
+- **Redo:** Cleared on any new action
+- **Batch:** AI operations group multiple creates into one undoable action
+- **Ctrl+Z / Cmd+Z:** Undo. **Ctrl+Shift+Z / Cmd+Shift+Z:** Redo.
 
-### Undo Logic
 | Entry Type | Undo Action |
 |---|---|
 | create | Delete the object |
@@ -325,125 +458,100 @@ HistoryEntry =
 | modify | Restore previousProps |
 | batch | Undo each sub-entry in reverse order |
 
----
+### Text Editing & Persistence
 
-## 10. Canvas Engine (Fabric.js)
+- `textBufferRef` Map captures text before sync updates, restores it after remote recreation
+- `editingTextboxRef` tracks the active Textbox to prevent sync from overwriting mid-edit
+- Color changes are skipped during active text editing
 
-- **Virtual size**: Infinite (unbounded in all directions)
-- **Zoom range**: 0.1x – 5x (wheel zoom targets pointer position)
-- **Grid**: Dynamic 50px lines, viewport-only (throttled at 16ms)
-- **Pan**: Space+drag, middle mouse, or pan tool (no constraints)
+### Remote Object Highlighting
 
-### Shape Support
-| Shape | Fabric Type | Notes |
-|---|---|---|
-| rect | Rect | — |
-| circle | Circle | Uses radius prop |
-| line | Line | x1/y1/x2/y2 |
-| triangle | Triangle | — |
-| hexagon | Polygon | 6-point generated polygon |
-| star | Polygon | 10-point generated star |
-| sticky | Textbox | 200x200 yellow note with editable text |
-
-### Drawing Flow
-1. `mousedown` → create shape at pointer
-2. `mousemove` → resize via drag distance
-3. `mouseup` → finalize if ≥5px, discard otherwise
-4. Normalize coordinates, assign UUID, sync, add to history
-
-### Remote Highlight System
-- Colored 4px stroke in remote user's color
-- Original stroke saved in `_remoteHighlightOriginal` custom property
-- Only visible when object is stable (not being dragged)
-- Name badge overlay positioned via viewport transform
+- Other users' selected objects: 4px colored stroke in that user's color
+- Username badge overlay above the object
+- Original stroke saved and restored when remote user deselects
+- Highlights hidden during drag (object marked as moving)
 
 ---
 
-## 11. AI Assistant
-
-### Architecture
-Fully client-side. No API calls. Regex-based natural language parsing.
-
-### Supported Commands
-| Pattern | Action |
-|---|---|
-| `create [count] [color] [shape]` | Create shapes |
-| `create sticky note [saying '...']` | Create editable sticky note |
-| `create NxM grid` | Create grid of rectangles |
-| `create login form` | Generate multi-object UI mockup |
-| `create navigation bar` | Generate nav bar mockup |
-| `arrange in row/column/grid` | Reposition all objects |
-| `delete all` | Clear canvas |
-
-### Parsing Pipeline
-```
-Input text
-  → Extract color (named or hex)
-  → Extract position ("center", "top left", "at x,y")
-  → Extract size ("small", "large", "WxH")
-  → Extract count ("3 circles", "five rectangles")
-  → Extract shape type
-  → Generate actions
-  → Execute with history batching
-```
-
-### UI
-- Floating panel, bottom-right
-- Chat history with user/assistant messages
-- Quick command buttons when collapsed
-- "Thinking..." indicator during processing
-
----
-
-## 12. Routing & Auth Guards
-
-```
-/login         → LoginForm (redirects to / if authenticated)
-/              → Home (protected) — room lobby
-/room/:roomId  → Room (protected) — canvas workspace
-*              → redirect to /
-```
-
-`ProtectedRoute` wrapper checks `useAuth()` — redirects to `/login` if no user. Shows loading spinner while auth initializes.
-
----
-
-## 13. Performance Optimizations
+## 8. Performance Optimizations
 
 | Optimization | Detail |
 |---|---|
 | Cursor throttle | 50ms (max 20 updates/sec) |
 | Object sync debounce | 100ms |
 | Object drag broadcast | 50ms throttle |
-| Echo prevention | Skip processing own Firestore updates |
+| Echo prevention | Skip processing own Firestore updates via `localPendingUpdates` |
 | Optimistic UI | Local state updates before server round-trip |
-| rAF cursor rendering | CursorOverlay uses requestAnimationFrame |
+| rAF cursor rendering | CursorOverlay uses `requestAnimationFrame` |
 | History cap | Max 50 undo entries |
-| Stale cleanup | Interval-based removal of inactive cursors/presence |
-| Viewport transform caching | Avoid recalculating on every frame |
+| Stale cleanup | Interval-based removal of inactive cursors (>5s) and presence (>8s) |
+| Viewport-only grid | Grid lines drawn only within visible area |
+| Partial sync | `syncObjectPartial()` for position-only updates during drag |
 
 ---
 
-## 14. Security
+## 9. Security
 
-- **Display name sanitization**: Character filtering to prevent XSS
-- **Room membership**: `members[]` array on room document controls access
-- **Firebase Security Rules**: Server-side enforcement (configured in Firebase console)
-- **Demo mode isolation**: Local storage only, no backend exposure
-- **No secrets in client**: Firebase config loaded from env vars (public keys only)
+- **Firestore Security Rules:** Members-only CRUD on objects; users can only join rooms (not remove others); AI requests scoped to members; only Cloud Functions can write AI results
+- **RTDB Security Rules:** Authenticated read for all room data; users can only write their own cursor/presence; data structure validation
+- **Cloud Function validation:** Command length limits, rate limiting, input sanitization
+- **Firebase Hosting headers:** `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`
+- **No secrets in client:** Firebase config is public keys only; Anthropic API key stays in Cloud Functions environment
+- **Display name sanitization:** Character filtering to prevent XSS
 
 ---
 
-## 15. Dual-Mode Design (Firebase vs Demo)
+## 10. The "Why" Behind the "How" — Trade-Off Register
 
-Every real-time feature has two implementations:
-
-| Feature | Firebase Mode | Demo Mode |
+| Decision | Chosen For | Accepted Cost |
 |---|---|---|
-| Object sync | Firestore snapshot listeners | BroadcastChannel `canvas-room-{id}` |
-| Cursor sync | RTDB listeners + onDisconnect | BroadcastChannel `canvas-cursors-{id}` |
-| Presence | RTDB listeners + onDisconnect | BroadcastChannel `canvas-presence-{id}` + heartbeat |
-| Auth | Firebase Auth (Google/email) | Local demo user object |
-| Disconnect | Firebase onDisconnect handlers | Heartbeat timeout (6s) |
+| **Last-write-wins sync** | Simplicity — no CRDT/OT library, no version vectors | Concurrent edits on the same object: one user's change is silently lost |
+| **Firestore for objects, RTDB for cursors** | Right tool for each job — persistence vs. low-latency ephemeral | Two Firebase services to configure, two subscription patterns to maintain |
+| **No external state library** | Fewer dependencies, simpler mental model, Firebase IS the store | `Room.tsx` is a wiring-heavy orchestrator; hook inter-dependencies are implicit |
+| **1700-line Canvas component** | All Fabric.js logic co-located — drawing, sync, undo, selection in one place | File is large; extracting sub-hooks would require careful ref-sharing |
+| **Cloud Function AI proxy** | API key stays server-side; rate limiting enforced server-side | Cold start latency (~2-5s first call); Firestore round-trip adds ~500ms vs direct HTTP |
+| **Demo mode via BroadcastChannel** | Zero-config local dev; same code paths as production | Only works cross-tab on same browser; no true multi-device demo |
+| **Ref-based undo history (max 50)** | No re-renders on history changes; fast push/pop | History is lost on page refresh; not synced across users |
+| **Throttle cursors at 50ms** | Reduces RTDB writes from ~60/s to ~20/s per user | Cursor positions appear slightly less smooth remotely |
+| **AI via Firestore document trigger** | Reuses existing real-time pipeline; no HTTP endpoint needed | Extra Firestore reads/writes; polling-like UX (write → wait → read result) |
+| **Tailwind CSS (utility-first)** | Rapid prototyping, no CSS file management, consistent spacing | Large class strings in JSX; harder to scan component structure visually |
 
-The `isFirebaseConfigured` flag in `firebase.ts` drives the mode. Each hook checks this flag and branches accordingly. Demo mode achieves feature parity within a single browser.
+---
+
+## 11. Tech Debt & Scaling Concerns
+
+### High Priority
+
+**1. Canvas.tsx is 1700+ lines**
+The core Canvas component handles drawing, selection, undo/redo, remote sync rendering, text editing, color management, and context menus all in one file. This makes it difficult to reason about, test in isolation, or modify one concern without risk to others. Extracting `useDrawing`, `useUndoRedo`, and `useRemoteHighlights` hooks would reduce cognitive load.
+
+**2. No offline support / conflict resolution**
+Firestore has offline caching, but the app doesn't handle the reconnection case gracefully. If two users edit while one is offline, reconnection produces silent overwrites (last-write-wins). At scale, this will cause user frustration. A lightweight vector clock or operation log would allow merge-on-reconnect.
+
+**3. Undo history is local and volatile**
+History lives in a `useRef` array (max 50 entries), lost on refresh, and not shared between users. User A creating a shape and User B pressing Ctrl+Z won't undo A's action — only B's own actions. For a collaborative tool, shared undo (or per-user undo with visibility) is expected.
+
+### Medium Priority
+
+**4. No pagination on canvas objects**
+`subscribeToObjects()` loads ALL objects in a room via a single `onSnapshot`. A room with 1000+ objects will cause: large initial download, expensive snapshot diffs, slow Fabric.js rendering. Solution: viewport-based loading or object archiving for off-screen elements.
+
+**5. AI rate limiting is per-function-invocation, not centralized**
+Rate limits are checked by reading recent AI request documents (query last 1 minute). Under high concurrency, two requests could pass the check simultaneously before either is written. A Firestore transaction or distributed counter would be more reliable.
+
+**6. No test coverage on Canvas.tsx**
+Tests exist for utilities (`colors.test.ts`, `throttle.test.ts`) and AI action parsing (`aiService.test.ts`), but the 1700-line Canvas component — the heart of the app — has zero tests. Integration tests with a mock Fabric.js canvas would catch regressions in drawing, sync, and undo.
+
+### Lower Priority
+
+**7. Cursor cleanup relies on client-side staleness checks**
+Stale cursors (>5s without update) are filtered on the client, but the RTDB entries remain. Rooms with many transient users accumulate orphaned cursor entries. A Cloud Function on a schedule (or RTDB TTL rules) would clean these up.
+
+**8. Room membership is append-only**
+The Firestore security rules allow users to add themselves to `members[]` but not remove others. There's no mechanism for room owners to kick users or for users to leave rooms. The `members` array will grow unboundedly.
+
+**9. Single-bundle build (~1MB)**
+The entire app ships as one JS chunk (~1,077 KB). Fabric.js alone is a large dependency. Route-based code splitting (`React.lazy` for Room vs. Home vs. Login) and dynamic import of Fabric.js only on the Room route would cut initial load significantly.
+
+**10. Hardcoded AI model and token limits**
+The Cloud Function uses `claude-sonnet-4-5-20250929` and `max_tokens: 1024` as constants. These should be environment variables or Firestore config documents so they can be updated without redeploying the function.

@@ -1,26 +1,47 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+export type ThrottledFunction<T extends (...args: any[]) => any> =
+  ((...args: Parameters<T>) => void) & { flush: () => void };
+
 export function throttle<T extends (...args: any[]) => any>(
   func: T,
   limit: number
-): (...args: Parameters<T>) => void {
+): ThrottledFunction<T> {
   let inThrottle = false;
   let lastArgs: Parameters<T> | null = null;
+  let lastThis: any = null;
+  let timerId: ReturnType<typeof setTimeout> | null = null;
 
-  return function (this: any, ...args: Parameters<T>) {
+  const throttled = function (this: any, ...args: Parameters<T>) {
+    lastThis = this;
     if (!inThrottle) {
       func.apply(this, args);
       inThrottle = true;
-      setTimeout(() => {
+      timerId = setTimeout(() => {
         inThrottle = false;
+        timerId = null;
         if (lastArgs) {
-          func.apply(this, lastArgs);
+          func.apply(lastThis, lastArgs);
           lastArgs = null;
         }
       }, limit);
     } else {
       lastArgs = args;
     }
+  } as ThrottledFunction<T>;
+
+  throttled.flush = function () {
+    if (lastArgs) {
+      if (timerId) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
+      inThrottle = false;
+      func.apply(lastThis, lastArgs);
+      lastArgs = null;
+    }
   };
+
+  return throttled;
 }
 
 export type DebouncedFunction<T extends (...args: any[]) => any> =

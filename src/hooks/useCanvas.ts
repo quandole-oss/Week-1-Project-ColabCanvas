@@ -161,7 +161,7 @@ export function useCanvas(
         vpt[5] += e.clientY - lastPosY.current;
 
         updateGrid(canvas);
-        canvas.requestRenderAll();
+        canvas.renderAll();
         lastPosX.current = e.clientX;
         lastPosY.current = e.clientY;
       }
@@ -212,6 +212,8 @@ export function useCanvas(
               ? Math.round(storedH * (obj.scaleY ?? 1))
               : storedH;
             (obj as any)._stickyHeight = actualHeight;
+            // Update minWidth so Fabric won't re-expand the sticky
+            (obj as any).minWidth = Math.max(actualWidth, 40);
           }
         }
         const rawRadius = (obj as unknown as { radius?: number }).radius;
@@ -238,7 +240,7 @@ export function useCanvas(
           scaleY: 1,
         });
         obj.setCoords();
-        canvas.requestRenderAll();
+        canvas.renderAll();
 
         const isSticky = obj instanceof Textbox;
         const props: CanvasObjectProps = {

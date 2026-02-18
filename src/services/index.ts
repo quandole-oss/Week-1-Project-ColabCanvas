@@ -1,4 +1,4 @@
 export * from './firebase';
 export * from './canvasSync';
 export * from './cursorSync';
-export * from './presenceSync';
+export { setUserOnline, setUserOffline, heartbeatPresence, subscribeToPresence, getConnectedRef } from './presenceSync';

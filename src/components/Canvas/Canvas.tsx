@@ -904,10 +904,21 @@ export function Canvas({
         setContextMenuPos(null);
         return;
       }
+      const zoom = canvas.getZoom();
+      const vpt = canvas.viewportTransform;
+      if (!vpt) {
+        setContextMenuPos(null);
+        return;
+      }
       const bounds = activeObj.getBoundingRect();
+      // Transform canvas-space bounds to screen-space using viewport transform
+      const screenLeft = bounds.left * zoom + vpt[4];
+      const screenTop = bounds.top * zoom + vpt[5];
+      const screenWidth = bounds.width * zoom;
+      const screenHeight = bounds.height * zoom;
       setContextMenuPos({
-        left: bounds.left + bounds.width + 8,
-        top: bounds.top,
+        left: screenLeft + screenWidth + 16,
+        top: screenTop + screenHeight / 2,
       });
     };
 
@@ -1057,7 +1068,7 @@ export function Canvas({
             left: pointer.x,
             top: pointer.y,
             width: 200,
-            minWidth: 200,
+            minWidth: 40,
             fill: textColor,
             backgroundColor: '#FEF3C7',
             strokeWidth: 0,
@@ -1432,14 +1443,12 @@ export function Canvas({
     const canvas = fabricRef.current;
     if (!canvas || !remoteObjects) return;
 
-    console.log('[Canvas] Syncing remote objects, count:', remoteObjects.size);
     remoteObjects.forEach((obj, id) => {
       // Skip objects that are pending deletion (prevents undo race condition)
       if (pendingDeletionRef.current.has(id)) {
         return;
       }
 
-      // Skip if this is our own object being echoed back
       const existingLocal = canvas.getObjects().find(
         (o) => (o as FabricObject & { id?: string }).id === id
       );
@@ -1465,9 +1474,6 @@ export function Canvas({
       }
 
       // Create new remote object
-      console.log('[Canvas] Creating new remote object:', id, obj.type);
-      // Ref-based persistence: if user typed text that hasn't synced yet,
-      // restore it onto the newly created object so it isn't lost.
       const bufferedText = textBufferRef.current.get(id);
       const objToCreate = bufferedText !== undefined
         ? { ...obj, props: { ...obj.props, text: bufferedText } }
@@ -1477,9 +1483,6 @@ export function Canvas({
         (fabricObj as FabricObject & { id: string }).id = id;
         canvas.add(fabricObj);
         remoteObjectsRef.current.set(id, fabricObj);
-        console.log('[Canvas] Added fabric object to canvas');
-      } else {
-        console.error('[Canvas] Failed to create fabric object for:', obj);
       }
     });
 
@@ -1721,9 +1724,9 @@ export function Canvas({
           // Get bounding rect for accurate top position (accounts for rotation)
           const bounds = obj.getBoundingRect();
 
-          // Get center point for horizontal positioning
-          const center = obj.getCenterPoint();
-          const screenCenterX = center.x * zoom + vpt[4];
+          // Transform canvas-space bounds to screen-space
+          const screenCenterX = bounds.left * zoom + vpt[4] + (bounds.width * zoom) / 2;
+          const screenTop = bounds.top * zoom + vpt[5];
 
           return (
             <div
@@ -1732,7 +1735,7 @@ export function Canvas({
               style={{
                 backgroundColor: selection.color,
                 left: screenCenterX,
-                top: bounds.top - 24,
+                top: screenTop - 24,
                 transform: 'translateX(-50%)',
               }}
             >
@@ -1850,7 +1853,7 @@ function applyStickyHeightOverride(tb: Textbox) {
     original();
     // Don't fight Fabric during active scaling (user is resizing)
     if ((this.scaleX ?? 1) !== 1 || (this.scaleY ?? 1) !== 1) return;
-    const minH = (this as any)._stickyHeight ?? 200;
+    const minH = Math.max((this as any)._stickyHeight ?? 200, 40);
     if (this.height < minH) {
       this.height = minH;
     }
@@ -1958,7 +1961,7 @@ function createFabricObject(obj: CanvasObject): FabricObject | null {
         left: props.left,
         top: props.top,
         width: props.width ?? 200,
-        minWidth: 200,
+        minWidth: 40,
         fill: props.textColor || '#000000',
         backgroundColor: props.fill || '#FEF3C7',
         strokeWidth: 0,
@@ -2022,7 +2025,7 @@ function updateFabricObject(fabricObj: FabricObject, obj: CanvasObject) {
       { left: props.left, top: props.top },
       {
         duration: 120,
-        onChange: () => fabricObj.canvas?.requestRenderAll(),
+        onChange: () => fabricObj.canvas?.renderAll(),
         onComplete: () => fabricObj.setCoords(),
       }
     );
