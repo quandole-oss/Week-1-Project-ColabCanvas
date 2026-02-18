@@ -8,4 +8,13 @@ export default defineConfig({
   esbuild: {
     pure: ['console.log', 'console.warn'],
   },
+  server: {
+    proxy: {
+      '/api/anthropic': {
+        target: 'https://api.anthropic.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/anthropic/, ''),
+      },
+    },
+  },
 })

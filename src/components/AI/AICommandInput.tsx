@@ -4,9 +4,10 @@ interface AICommandInputProps {
   onSubmit: (command: string) => void;
   isProcessing: boolean;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  inputRef?: React.RefObject<HTMLInputElement | null>;
 }
 
-export function AICommandInput({ onSubmit, isProcessing, messages }: AICommandInputProps) {
+export function AICommandInput({ onSubmit, isProcessing, messages, inputRef }: AICommandInputProps) {
   const [input, setInput] = useState('');
   const [isExpanded, setIsExpanded] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -76,10 +77,11 @@ export function AICommandInput({ onSubmit, isProcessing, messages }: AICommandIn
           <span className="text-white text-[10px] font-medium">AI</span>
         </div>
         <input
+          ref={inputRef}
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask AI..."
+          placeholder="Ask AI... (⌘K)"
           className="flex-1 bg-transparent border-none outline-none text-gray-800 placeholder-gray-400 text-xs min-w-0"
           disabled={isProcessing}
         />

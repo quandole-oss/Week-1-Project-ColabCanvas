@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { Canvas } from '../Canvas';
 import type { HistoryEntry } from '../Canvas';
@@ -25,6 +25,7 @@ function sanitizeDisplayName(name: string | null | undefined): string {
 export function Room({ roomId }: RoomProps) {
   const { user, signOut } = useAuth();
   const objectCountRef = useRef(0);
+  const aiInputRef = useRef<HTMLInputElement>(null);
   const [getViewportCenter, setGetViewportCenter] = useState<(() => { x: number; y: number }) | null>(null);
   const addToHistoryRef = useRef<((entry: HistoryEntry) => void) | null>(null);
   // Batch history entries for AI operations (so multiple objects undo together)
@@ -188,6 +189,18 @@ export function Room({ roomId }: RoomProps) {
     [broadcastCursor]
   );
 
+  // CMD+K / Ctrl+K shortcut to focus AI input
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        aiInputRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   return (
     <div className="w-screen h-screen overflow-hidden bg-gradient-to-br from-blue-100 via-purple-50 to-pink-100 relative">
       {/* Connection status */}
@@ -249,6 +262,7 @@ export function Room({ roomId }: RoomProps) {
         onSubmit={processCommand}
         isProcessing={isProcessing}
         messages={messages}
+        inputRef={aiInputRef}
       />
     </div>
   );

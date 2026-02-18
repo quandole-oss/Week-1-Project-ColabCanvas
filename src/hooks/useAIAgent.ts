@@ -51,15 +51,29 @@ export function useAIAgent({
         let result: string;
 
         if (isGeminiConfigured()) {
-          // Use Gemini API for intelligent command processing
-          result = await processGeminiCommand(
-            command,
-            canvasObjects,
-            createObject,
-            updateObject,
-            deleteObject,
-            viewportCenter
-          );
+          try {
+            // Use cloud AI for intelligent command processing
+            result = await processGeminiCommand(
+              command,
+              canvasObjects,
+              createObject,
+              updateObject,
+              deleteObject,
+              viewportCenter
+            );
+          } catch {
+            // Cloud AI failed — fall back to local regex parser
+            console.warn('[AI] Cloud AI unavailable, using local parser');
+            result = processLocalCommand(
+              command,
+              canvasObjects,
+              createObject,
+              updateObject,
+              deleteObject,
+              clearAllObjects,
+              getViewportCenter
+            );
+          }
         } else {
           // Fall back to local regex parser (no API key needed)
           result = processLocalCommand(
