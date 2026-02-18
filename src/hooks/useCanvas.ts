@@ -1,34 +1,11 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { Canvas, FabricObject, Line, Point, Textbox } from 'fabric';
+import { Canvas, FabricObject, Line, Point, Textbox, ActiveSelection } from 'fabric';
 import type { TPointerEventInfo, TPointerEvent } from 'fabric';
 import type { Tool, CanvasObjectProps, ShapeType } from '../types';
+import { snapToGrid, getTopLeftPosition, getAbsolutePosition as getAbsoluteTopLeftPosition } from '../utils/canvasPosition';
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
-const SNAP_SIZE = 25;
-
-function snapToGrid(value: number): number {
-  return Math.round(value / SNAP_SIZE) * SNAP_SIZE;
-}
-
-// Calculate the top-left position regardless of current originX/originY.
-// Fabric.js changes origin during scaling (e.g., dragging top-left corner sets
-// originX:'right', originY:'bottom'). If we read obj.left/obj.top directly,
-// we get the position of the CURRENT origin, not the top-left corner.
-function getTopLeftPosition(obj: FabricObject): { left: number; top: number } {
-  const width = (obj.width ?? 0) * (obj.scaleX ?? 1);
-  const height = (obj.height ?? 0) * (obj.scaleY ?? 1);
-  let left = obj.left ?? 0;
-  let top = obj.top ?? 0;
-
-  if (obj.originX === 'right') left -= width;
-  else if (obj.originX === 'center') left -= width / 2;
-
-  if (obj.originY === 'bottom') top -= height;
-  else if (obj.originY === 'center') top -= height / 2;
-
-  return { left, top };
-}
 
 interface UseCanvasOptions {
   onObjectCreated?: (id: string, type: ShapeType, props: CanvasObjectProps) => void;
@@ -194,6 +171,50 @@ export function useCanvas(
     // Object modification handler (fires when drag/transform completes)
     const handleObjectModified = (opt: { target: FabricObject }) => {
       const obj = opt.target;
+
+      // Handle ActiveSelection: sync each child individually using absolute coords
+      if (obj instanceof ActiveSelection) {
+        obj.getObjects().forEach((child) => {
+          const childId = (child as FabricObject & { id?: string }).id;
+          if (childId && optionsRef.current.onObjectModified) {
+            // Use absolute position (child.left/top are group-relative inside ActiveSelection)
+            const topLeft = getAbsoluteTopLeftPosition(child);
+            // Extract effective scale from transform matrix (includes group scale)
+            const matrix = child.calcTransformMatrix();
+            const effScaleX = Math.sqrt(matrix[0] * matrix[0] + matrix[1] * matrix[1]);
+            const effScaleY = Math.sqrt(matrix[2] * matrix[2] + matrix[3] * matrix[3]);
+            const actualWidth = Math.round((child.width ?? 0) * effScaleX);
+            let actualHeight = Math.round((child.height ?? 0) * effScaleY);
+            if (child instanceof Textbox) {
+              const customType = (child as FabricObject & { customType?: string }).customType;
+              if (customType === 'sticky') {
+                const storedH = (child as any)._stickyHeight ?? 200;
+                const wasResized = effScaleY !== 1;
+                actualHeight = wasResized ? Math.round(storedH * effScaleY) : storedH;
+                (child as any)._stickyHeight = actualHeight;
+                (child as any).minWidth = Math.max(actualWidth, 40);
+              }
+            }
+            const rawRadius = (child as unknown as { radius?: number }).radius;
+            const actualRadius = rawRadius !== undefined ? Math.round(rawRadius * effScaleX) : undefined;
+            const snappedLeft = Math.round(topLeft.left);
+            const snappedTop = Math.round(topLeft.top);
+            const isSticky = child instanceof Textbox;
+            const props: CanvasObjectProps = {
+              left: snappedLeft, top: snappedTop, width: actualWidth, height: actualHeight,
+              ...(actualRadius !== undefined ? { radius: actualRadius } : {}),
+              fill: isSticky ? (child as Textbox).backgroundColor as string : child.fill as string,
+              stroke: child.stroke as string, strokeWidth: child.strokeWidth ?? 2,
+              angle: child.angle ?? 0, scaleX: 1, scaleY: 1,
+              ...(isSticky ? { textColor: child.fill as string, text: (child as Textbox).text || '', fontSize: (child as Textbox).fontSize, fontFamily: (child as Textbox).fontFamily } : {}),
+            };
+            optionsRef.current.onObjectModified(childId, props);
+          }
+        });
+        canvas.renderAll();
+        return;
+      }
+
       const id = (obj as FabricObject & { id?: string }).id;
       if (id && optionsRef.current.onObjectModified) {
         // Normalize origin to left/top (Fabric changes origin during scale operations)
@@ -276,6 +297,30 @@ export function useCanvas(
       if (now - lastMovingUpdate < 50) return;
       lastMovingUpdate = now;
 
+      // Handle ActiveSelection: sync each child individually using absolute coords
+      if (obj instanceof ActiveSelection) {
+        obj.getObjects().forEach((child) => {
+          const childId = (child as FabricObject & { id?: string }).id;
+          if (childId && optionsRef.current.onObjectModified) {
+            const topLeft = getAbsoluteTopLeftPosition(child);
+            const isSticky = child instanceof Textbox;
+            const radius = (child as unknown as { radius?: number }).radius;
+            const props: CanvasObjectProps = {
+              left: Math.round(topLeft.left), top: Math.round(topLeft.top),
+              width: child.width,
+              height: (isSticky && (child as FabricObject & { customType?: string }).customType === 'sticky') ? ((child as any)._stickyHeight ?? 200) : child.height,
+              ...(radius !== undefined ? { radius } : {}),
+              fill: isSticky ? (child as Textbox).backgroundColor as string : child.fill as string,
+              stroke: child.stroke as string, angle: child.angle,
+              scaleX: child.scaleX, scaleY: child.scaleY,
+              ...(isSticky ? { textColor: child.fill as string } : {}),
+            };
+            optionsRef.current.onObjectModified(childId, props);
+          }
+        });
+        return;
+      }
+
       const id = (obj as FabricObject & { id?: string }).id;
       if (id && optionsRef.current.onObjectModified) {
         // Normalize origin to top-left for consistent sync
@@ -307,6 +352,30 @@ export function useCanvas(
       const now = Date.now();
       if (now - lastMovingUpdate < 50) return;
       lastMovingUpdate = now;
+
+      // Handle ActiveSelection: sync each child individually using absolute coords
+      if (obj instanceof ActiveSelection) {
+        obj.getObjects().forEach((child) => {
+          const childId = (child as FabricObject & { id?: string }).id;
+          if (childId && optionsRef.current.onObjectModified) {
+            const topLeft = getAbsoluteTopLeftPosition(child);
+            const isSticky = child instanceof Textbox;
+            const radius = (child as unknown as { radius?: number }).radius;
+            const props: CanvasObjectProps = {
+              left: Math.round(topLeft.left), top: Math.round(topLeft.top),
+              width: child.width,
+              height: (isSticky && (child as FabricObject & { customType?: string }).customType === 'sticky') ? ((child as any)._stickyHeight ?? 200) : child.height,
+              ...(radius !== undefined ? { radius } : {}),
+              fill: isSticky ? (child as Textbox).backgroundColor as string : child.fill as string,
+              stroke: child.stroke as string, angle: child.angle,
+              scaleX: child.scaleX, scaleY: child.scaleY,
+              ...(isSticky ? { textColor: child.fill as string } : {}),
+            };
+            optionsRef.current.onObjectModified(childId, props);
+          }
+        });
+        return;
+      }
 
       const id = (obj as FabricObject & { id?: string }).id;
       if (id && optionsRef.current.onObjectModified) {

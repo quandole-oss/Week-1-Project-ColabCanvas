@@ -1,19 +1,13 @@
 import { useRef, useEffect, useState, useCallback, type ReactNode } from 'react';
-import { Rect, Circle, Line, Polygon, Triangle, Textbox, FabricObject } from 'fabric';
+import { Rect, Circle, Line, Polygon, Triangle, Textbox, FabricObject, ActiveSelection } from 'fabric';
 import type { TPointerEventInfo, TPointerEvent } from 'fabric';
 import { v4 as uuidv4 } from 'uuid';
 import { useCanvas } from '../../hooks/useCanvas';
+import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { CanvasToolbar } from './CanvasToolbar';
 import { CursorOverlay } from './CursorOverlay';
 import type { CanvasObjectProps, ShapeType, CursorState, CanvasObject } from '../../types';
-
-// Grid snap size (half of the visual grid for finer placement)
-const SNAP_SIZE = 25;
-
-// Snap a value to the nearest grid increment
-function snapToGrid(value: number): number {
-  return Math.round(value / SNAP_SIZE) * SNAP_SIZE;
-}
+import { snapToGrid, getAbsolutePosition } from '../../utils/canvasPosition';
 
 // History entry for undo (supports single or batch operations)
 export interface HistoryEntry {
@@ -31,6 +25,7 @@ interface CanvasProps {
   roomId: string;
   userId: string;
   onObjectCreated?: (id: string, type: ShapeType, props: CanvasObjectProps, zIndex: number) => void;
+  onObjectsCreated?: (objects: { id: string; type: ShapeType; props: CanvasObjectProps; zIndex: number }[]) => void;
   onObjectModified?: (id: string, props: CanvasObjectProps) => void;
   onFlushSync?: () => void;
   onEditingObjectChange?: (id: string | null) => void;
@@ -38,12 +33,14 @@ interface CanvasProps {
   onCursorMove?: (x: number, y: number, selectedObjectId?: string | null, isMoving?: boolean) => void;
   onViewportCenterChange?: (getCenter: () => { x: number; y: number }) => void;
   onHistoryAddChange?: (addHistory: (entry: HistoryEntry) => void) => void;
+  onObjectZIndexChanged?: (id: string, zIndex: number) => void;
   remoteCursors?: Map<string, CursorState>;
   remoteObjects?: Map<string, CanvasObject>;
 }
 
 export function Canvas({
   onObjectCreated,
+  onObjectsCreated,
   onObjectModified,
   onFlushSync,
   onEditingObjectChange,
@@ -51,6 +48,7 @@ export function Canvas({
   onCursorMove,
   onViewportCenterChange,
   onHistoryAddChange,
+  onObjectZIndexChanged,
   remoteCursors = new Map(),
   remoteObjects,
 }: CanvasProps) {
@@ -306,6 +304,33 @@ export function Canvas({
             canvas.add(fabricObj);
             onObjectCreated?.(subEntry.objectId, subEntry.objectType, subEntry.props, subEntry.zIndex ?? 0);
           }
+        } else if (subEntry.type === 'modify' && subEntry.previousProps) {
+          const obj = canvas.getObjects().find(
+            (o) => (o as FabricObject & { id?: string }).id === subEntry.objectId
+          );
+          if (obj) {
+            obj.set({
+              left: subEntry.previousProps.left,
+              top: subEntry.previousProps.top,
+              fill: subEntry.previousProps.fill,
+              stroke: subEntry.previousProps.stroke,
+              strokeWidth: subEntry.previousProps.strokeWidth,
+              angle: subEntry.previousProps.angle,
+              scaleX: subEntry.previousProps.scaleX,
+              scaleY: subEntry.previousProps.scaleY,
+            });
+            if (obj instanceof Rect || obj instanceof Triangle || obj instanceof Polygon) {
+              obj.set({ width: subEntry.previousProps.width, height: subEntry.previousProps.height });
+            } else if (obj instanceof Circle) {
+              obj.set({ radius: subEntry.previousProps.radius });
+            } else if (obj instanceof Line) {
+              obj.set({ x1: subEntry.previousProps.x1, y1: subEntry.previousProps.y1, x2: subEntry.previousProps.x2, y2: subEntry.previousProps.y2 });
+            } else if (obj instanceof Textbox) {
+              obj.set({ width: subEntry.previousProps.width, height: subEntry.previousProps.height, text: subEntry.previousProps.text ?? '', fontSize: subEntry.previousProps.fontSize, fontFamily: subEntry.previousProps.fontFamily });
+            }
+            obj.setCoords();
+            onObjectModified?.(subEntry.objectId, subEntry.previousProps);
+          }
         }
       }
     } else if (entry.type === 'create') {
@@ -436,6 +461,33 @@ export function Canvas({
             remoteObjectsRef.current.delete(subEntry.objectId);
             onObjectDeleted?.(subEntry.objectId);
           }
+        } else if (subEntry.type === 'modify' && subEntry.props) {
+          const obj = canvas.getObjects().find(
+            (o) => (o as FabricObject & { id?: string }).id === subEntry.objectId
+          );
+          if (obj) {
+            obj.set({
+              left: subEntry.props.left,
+              top: subEntry.props.top,
+              fill: subEntry.props.fill,
+              stroke: subEntry.props.stroke,
+              strokeWidth: subEntry.props.strokeWidth,
+              angle: subEntry.props.angle,
+              scaleX: subEntry.props.scaleX,
+              scaleY: subEntry.props.scaleY,
+            });
+            if (obj instanceof Rect || obj instanceof Triangle || obj instanceof Polygon) {
+              obj.set({ width: subEntry.props.width, height: subEntry.props.height });
+            } else if (obj instanceof Circle) {
+              obj.set({ radius: subEntry.props.radius });
+            } else if (obj instanceof Line) {
+              obj.set({ x1: subEntry.props.x1, y1: subEntry.props.y1, x2: subEntry.props.x2, y2: subEntry.props.y2 });
+            } else if (obj instanceof Textbox) {
+              obj.set({ width: subEntry.props.width, height: subEntry.props.height, text: subEntry.props.text ?? '', fontSize: subEntry.props.fontSize, fontFamily: subEntry.props.fontFamily });
+            }
+            obj.setCoords();
+            onObjectModified?.(subEntry.objectId, subEntry.props);
+          }
         }
       }
     } else if (entry.type === 'create' && entry.props && entry.objectType) {
@@ -552,57 +604,181 @@ export function Canvas({
     setContextMenuPos(null);
   }, [fabricRef, addToHistory, onObjectDeleted]);
 
-  // Keyboard shortcuts: undo (Ctrl+Z), redo (Ctrl+Shift+Z/Ctrl+Y), and delete (Delete/Backspace)
-  useEffect(() => {
+  // Clipboard ref for copy/paste
+  const clipboardRef = useRef<{ type: ShapeType; props: CanvasObjectProps }[] | null>(null);
+  const isPastingRef = useRef(false);
+  const pasteCountRef = useRef(0);
+
+  // Copy selected objects to internal clipboard
+  const handleCopy = useCallback(() => {
     const canvas = fabricRef.current;
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+    if (activeObjects.length === 0) return;
+    clipboardRef.current = activeObjects.map((obj) => ({
+      type: getObjectType(obj),
+      props: getObjectProps(obj),
+    }));
+    pasteCountRef.current = 0;
+  }, [fabricRef]);
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore when typing in input fields
-      const target = e.target as HTMLElement;
-      const isTyping = target.tagName === 'INPUT' ||
-                       target.tagName === 'TEXTAREA' ||
-                       target.isContentEditable;
+  // Paste objects from internal clipboard with offset
+  const handlePaste = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas || !clipboardRef.current) return;
+    if (isPastingRef.current) return;
+    isPastingRef.current = true;
 
-      // Undo: Ctrl+Z (without shift)
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey && !isTyping) {
-        e.preventDefault();
-        handleUndo();
-      }
+    // --- Selection Isolation ---
+    // Flush any pending sync updates for the current selection's objects
+    // so remoteObjects has their latest positions before we discard the selection.
+    if (onFlushSync) onFlushSync();
 
-      // Redo: Ctrl+Shift+Z or Ctrl+Y
-      if ((e.ctrlKey || e.metaKey) && ((e.key === 'z' && e.shiftKey) || e.key === 'y') && !isTyping) {
-        e.preventDefault();
-        handleRedo();
-      }
+    // Discard the current selection and fire selection:cleared so all listeners
+    // (undo tracking, cursor broadcast, etc.) properly process the deselection.
+    // This prevents previous objects from being carried over into the new group.
+    const previousActive = canvas.getActiveObject();
+    if (previousActive instanceof ActiveSelection) {
+      // Clear stale before-modify state for old selection children
+      previousActive.getObjects().forEach((child) => {
+        const childId = (child as FabricObject & { id?: string }).id;
+        if (childId) objectStateBeforeModifyRef.current.delete(childId);
+      });
+    }
+    canvas.discardActiveObject();
+    canvas.fire('selection:cleared');
 
-      // Delete key - delete selected objects with history support
-      if ((e.code === 'Delete' || e.code === 'Backspace') && !isTyping && canvas) {
-        const activeObjects = canvas.getActiveObjects();
-        activeObjects.forEach((obj) => {
-          const id = (obj as FabricObject & { id?: string }).id;
-          if (id) {
-            // Add to history before deleting
-            const objType = getObjectType(obj);
-            const props = getObjectProps(obj);
-            addToHistory({
-              type: 'delete',
-              objectId: id,
-              objectType: objType,
-              props,
-              zIndex: objectCountRef.current,
-            });
-            onObjectDeleted?.(id);
-          }
-          canvas.remove(obj);
+    pasteCountRef.current++;
+    const offset = 20 * pasteCountRef.current;
+
+    const batchObjects: { id: string; type: ShapeType; props: CanvasObjectProps; zIndex: number }[] = [];
+    const historyEntries: HistoryEntry[] = [];
+    const pastedFabricObjs: FabricObject[] = [];
+
+    clipboardRef.current.forEach((item) => {
+      const id = uuidv4();
+      objectCountRef.current++;
+      const newProps = { ...item.props, left: item.props.left + offset, top: item.props.top + offset };
+      const fabricObj = createFabricObject({
+        id,
+        type: item.type,
+        props: newProps,
+        zIndex: objectCountRef.current,
+      } as CanvasObject);
+      if (fabricObj) {
+        (fabricObj as FabricObject & { id: string }).id = id;
+        canvas.add(fabricObj);
+        pastedFabricObjs.push(fabricObj);
+        batchObjects.push({ id, type: item.type, props: newProps, zIndex: objectCountRef.current });
+        historyEntries.push({
+          type: 'create',
+          objectId: id,
+          objectType: item.type,
+          props: newProps,
+          zIndex: objectCountRef.current,
         });
-        canvas.discardActiveObject();
-        canvas.renderAll();
       }
-    };
+    });
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [fabricRef, handleUndo, handleRedo, addToHistory, onObjectDeleted]);
+    // Batch sync all pasted objects at once
+    if (batchObjects.length > 0) {
+      if (onObjectsCreated) {
+        onObjectsCreated(batchObjects);
+      } else {
+        // Fallback to individual calls
+        batchObjects.forEach((o) => onObjectCreated?.(o.id, o.type, o.props, o.zIndex));
+      }
+    }
+
+    // Add history as a single batch entry for clean undo
+    if (historyEntries.length === 1) {
+      addToHistory(historyEntries[0]);
+    } else if (historyEntries.length > 1) {
+      addToHistory({
+        type: 'batch',
+        objectId: 'paste',
+        batchEntries: historyEntries,
+      });
+    }
+
+    // --- Coordinate Finalization ---
+    // setCoords() on every pasted child BEFORE grouping into ActiveSelection
+    pastedFabricObjs.forEach((obj) => obj.setCoords());
+
+    // Select pasted objects so user can immediately reposition them
+    if (pastedFabricObjs.length === 1) {
+      canvas.setActiveObject(pastedFabricObjs[0]);
+    } else if (pastedFabricObjs.length > 1) {
+      const selection = new ActiveSelection(pastedFabricObjs, { canvas });
+      canvas.setActiveObject(selection);
+    }
+
+    canvas.renderAll();
+    isPastingRef.current = false;
+  }, [fabricRef, onObjectCreated, onObjectsCreated, addToHistory, onFlushSync]);
+
+  // Layer management callbacks
+  const handleLayerForward = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    const activeObj = canvas.getActiveObject();
+    if (!activeObj) return;
+    const id = (activeObj as FabricObject & { id?: string }).id;
+    if (!id) return;
+    canvas.bringObjectForward(activeObj);
+    const newIdx = canvas.getObjects().indexOf(activeObj);
+    onObjectZIndexChanged?.(id, newIdx);
+  }, [fabricRef, onObjectZIndexChanged]);
+
+  const handleLayerBackward = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    const activeObj = canvas.getActiveObject();
+    if (!activeObj) return;
+    const id = (activeObj as FabricObject & { id?: string }).id;
+    if (!id) return;
+    canvas.sendObjectBackwards(activeObj);
+    const newIdx = canvas.getObjects().indexOf(activeObj);
+    onObjectZIndexChanged?.(id, newIdx);
+  }, [fabricRef, onObjectZIndexChanged]);
+
+  const handleLayerToFront = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    const activeObj = canvas.getActiveObject();
+    if (!activeObj) return;
+    const id = (activeObj as FabricObject & { id?: string }).id;
+    if (!id) return;
+    canvas.bringObjectToFront(activeObj);
+    const newIdx = canvas.getObjects().indexOf(activeObj);
+    onObjectZIndexChanged?.(id, newIdx);
+  }, [fabricRef, onObjectZIndexChanged]);
+
+  const handleLayerToBack = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    const activeObj = canvas.getActiveObject();
+    if (!activeObj) return;
+    const id = (activeObj as FabricObject & { id?: string }).id;
+    if (!id) return;
+    canvas.sendObjectToBack(activeObj);
+    const newIdx = canvas.getObjects().indexOf(activeObj);
+    onObjectZIndexChanged?.(id, newIdx);
+  }, [fabricRef, onObjectZIndexChanged]);
+
+  // Keyboard shortcuts (extracted from inline useEffect)
+  useKeyboardShortcuts({
+    fabricRef,
+    onUndo: handleUndo,
+    onRedo: handleRedo,
+    onDeleteSelected: handleDeleteSelected,
+    onLayerForward: handleLayerForward,
+    onLayerBackward: handleLayerBackward,
+    onLayerToFront: handleLayerToFront,
+    onLayerToBack: handleLayerToBack,
+    onCopy: handleCopy,
+    onPaste: handlePaste,
+  });
 
   // Track object modifications for undo
   useEffect(() => {
@@ -613,6 +789,16 @@ export function Canvas({
     const handleMouseDown = (opt: TPointerEventInfo<TPointerEvent>) => {
       const target = opt.target;
       if (!target) return;
+      // Handle ActiveSelection: capture before-state for all children
+      if (target instanceof ActiveSelection) {
+        target.getObjects().forEach((child) => {
+          const childId = (child as FabricObject & { id?: string }).id;
+          if (childId) {
+            objectStateBeforeModifyRef.current.set(childId, getObjectProps(child));
+          }
+        });
+        return;
+      }
       const id = (target as FabricObject & { id?: string }).id;
       if (id) {
         // Store current state before any modification
@@ -623,6 +809,35 @@ export function Canvas({
     // Record modification in history when interaction completes
     const handleObjectModified = (opt: { target: FabricObject }) => {
       const obj = opt.target;
+      // Handle ActiveSelection: create a batch history entry for all children
+      if (obj instanceof ActiveSelection) {
+        const batchEntries: HistoryEntry[] = [];
+        obj.getObjects().forEach((child) => {
+          const childId = (child as FabricObject & { id?: string }).id;
+          if (childId) {
+            const previousProps = objectStateBeforeModifyRef.current.get(childId);
+            if (previousProps) {
+              const currentProps = getObjectProps(child);
+              if (JSON.stringify(previousProps) !== JSON.stringify(currentProps)) {
+                batchEntries.push({
+                  type: 'modify',
+                  objectId: childId,
+                  objectType: getObjectType(child),
+                  props: currentProps,
+                  previousProps,
+                });
+              }
+              objectStateBeforeModifyRef.current.delete(childId);
+            }
+          }
+        });
+        if (batchEntries.length === 1) {
+          addToHistory(batchEntries[0]);
+        } else if (batchEntries.length > 1) {
+          addToHistory({ type: 'batch', objectId: 'multi-select', batchEntries });
+        }
+        return;
+      }
       const id = (obj as FabricObject & { id?: string }).id;
       if (id) {
         const previousProps = objectStateBeforeModifyRef.current.get(id);
@@ -1459,6 +1674,13 @@ export function Canvas({
         if (activeObj && (activeObj as FabricObject & { id?: string }).id === id) {
           return;
         }
+        // Also skip objects inside an ActiveSelection (multi-select group)
+        if (activeObj instanceof ActiveSelection) {
+          const isInSelection = activeObj.getObjects().some(
+            (o) => (o as FabricObject & { id?: string }).id === id
+          );
+          if (isInSelection) return;
+        }
         // Also skip if a Textbox is in editing mode (optimistic lock — secondary guard)
         if (existingLocal instanceof Textbox && (existingLocal as any).isEditing) {
           return;
@@ -2172,17 +2394,8 @@ function getObjectProps(obj: FabricObject): CanvasObjectProps {
   // Check if object has a remote highlight - if so, use original stroke values
   const highlightOriginal = (obj as FabricObject & { _remoteHighlightOriginal?: { stroke: string | null; strokeWidth: number } })._remoteHighlightOriginal;
 
-  // Normalize origin to top-left for consistent coordinates
-  const width = (obj.width ?? 0) * (obj.scaleX ?? 1);
-  const height = (obj.height ?? 0) * (obj.scaleY ?? 1);
-  let left = obj.left ?? 0;
-  let top = obj.top ?? 0;
-
-  if (obj.originX === 'right') left -= width;
-  else if (obj.originX === 'center') left -= width / 2;
-
-  if (obj.originY === 'bottom') top -= height;
-  else if (obj.originY === 'center') top -= height / 2;
+  // Get absolute top-left position (handles grouped & standalone objects)
+  const { left, top } = getAbsolutePosition(obj);
 
   const props: CanvasObjectProps = {
     left: Math.round(left),
