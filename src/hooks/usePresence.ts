@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { onValue } from 'firebase/database';
 import { isFirebaseConfigured } from '../services/firebase';
-import { setUserOnline, subscribeToPresence, getConnectedRef } from '../services/presenceSync';
+import { setUserOnline, subscribeToPresence, getConnectedRef, heartbeatPresence } from '../services/presenceSync';
 import type { PresenceData } from '../types';
 
 interface UsePresenceOptions {
@@ -26,7 +26,6 @@ export function usePresence({
 }: UsePresenceOptions) {
   const [onlineUsers, setOnlineUsers] = useState<PresenceData[]>([]);
   const [isConnected, setIsConnected] = useState(false);
-  const [debugError, setDebugError] = useState<string | null>(null);
   const broadcastChannel = useRef<BroadcastChannel | null>(null);
 
   // Demo mode: use BroadcastChannel for presence sync
@@ -113,72 +112,55 @@ export function usePresence({
   useEffect(() => {
     if (!isFirebaseConfigured) return;
 
-    // Use console.error for all presence debug output (console.log is stripped in prod)
-    console.error('[Presence] Firebase effect running. roomId:', roomId, 'userId:', odId, 'userName:', userName);
-
     let presenceUnsub: (() => void) | undefined;
     let connectedUnsub: (() => void) | undefined;
 
     // 1. Subscribe to presence list FIRST (so we see changes immediately)
     try {
       presenceUnsub = subscribeToPresence(roomId, (users) => {
-        console.error('[Presence] Got users:', users.length, users.map(u => u.userName));
         setOnlineUsers(users);
       });
-      console.error('[Presence] subscribeToPresence: OK');
     } catch (error) {
       console.error('[Presence] subscribeToPresence failed:', error);
-      setDebugError('subscribeToPresence: ' + String(error));
     }
 
     // 2. Use .info/connected to detect RTDB connection state.
     //    Every time we (re)connect, announce presence.
-    //    The server's onDisconnect handler (set up inside setUserOnline)
-    //    automatically cleans up when we disconnect — no client cleanup needed.
     try {
       const connectedRef = getConnectedRef();
-      console.error('[Presence] getConnectedRef: OK');
       connectedUnsub = onValue(connectedRef, (snap) => {
         const connected = snap.val() === true;
-        console.error('[Presence] .info/connected:', connected);
         setIsConnected(connected);
 
         if (connected) {
-          // We just connected (or reconnected). Announce presence.
-          // onDisconnect is registered inside setUserOnline, so the server
-          // will clean up automatically when we drop.
           setUserOnline(roomId, odId, userName, userColor)
-            .then(() => console.error('[Presence] Announced online after connect'))
-            .catch((err) => {
-              console.error('[Presence] setUserOnline failed:', err);
-              setDebugError('setUserOnline: ' + String(err));
-            });
+            .catch((err) => console.error('[Presence] setUserOnline failed:', err));
         }
       }, (error) => {
-        console.error('[Presence] .info/connected listener error:', error);
-        setDebugError('.info/connected error: ' + String(error));
+        console.error('[Presence] .info/connected error:', error);
       });
     } catch (error) {
-      console.error('[Presence] .info/connected setup failed:', error);
-      setDebugError('connectedRef setup: ' + String(error));
+      console.error('[Presence] setup failed:', error);
     }
 
-    // 3. Re-announce when tab becomes visible (browser throttles background tabs)
+    // 3. Heartbeat: update lastSeen every 20s so stale sessions are detected
+    const heartbeatInterval = setInterval(() => {
+      heartbeatPresence(roomId, odId).catch(() => {});
+    }, 3_000);
+
+    // 4. Re-announce when tab becomes visible (browser throttles background tabs)
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
-        console.error('[Presence] Tab visible — re-announcing');
         setUserOnline(roomId, odId, userName, userColor).catch(() => {});
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
 
-    // Cleanup: only tear down listeners.
+    // Cleanup: only tear down listeners + heartbeat.
     // Do NOT call setUserOffline — let onDisconnect handle it server-side.
-    // This eliminates the race condition where cleanup's offline write
-    // arrives at RTDB after the next setup's online write.
     return () => {
-      console.error('[Presence] Cleaning up listeners (NOT writing offline)');
       document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(heartbeatInterval);
       if (presenceUnsub) presenceUnsub();
       if (connectedUnsub) connectedUnsub();
     };
@@ -187,6 +169,5 @@ export function usePresence({
   return {
     onlineUsers,
     isConnected,
-    debugError,
   };
 }

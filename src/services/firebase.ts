@@ -32,15 +32,12 @@ let db: Firestore | null = null;
 let rtdb: Database | null = null;
 let googleProvider: GoogleAuthProvider | null = null;
 
-console.error('[Firebase] isFirebaseConfigured:', isFirebaseConfigured, 'databaseURL:', firebaseConfig.databaseURL);
-
 if (isFirebaseConfigured) {
   try {
     app = initializeApp(firebaseConfig);
     auth = getAuth(app);
     db = getFirestore(app);
     rtdb = getDatabase(app);
-    console.error('[Firebase] RTDB initialized:', !!rtdb);
     googleProvider = new GoogleAuthProvider();
 
     // Initialize App Check if reCAPTCHA site key is configured

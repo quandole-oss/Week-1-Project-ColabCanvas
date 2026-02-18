@@ -43,7 +43,7 @@ export function Room({ roomId }: RoomProps) {
     userColor: user.color,
   });
 
-  const { onlineUsers, isConnected: presenceConnected, debugError: presenceDebugError } = usePresence({
+  const { onlineUsers, isConnected: presenceConnected } = usePresence({
     roomId,
     odId: user.uid,
     userName: safeDisplayName,
@@ -241,7 +241,6 @@ export function Room({ roomId }: RoomProps) {
           currentUserId={user.uid}
           remoteCursors={remoteCursors}
           presenceConnected={presenceConnected}
-          debugError={presenceDebugError}
         />
       </div>
 

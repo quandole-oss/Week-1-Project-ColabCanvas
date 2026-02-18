@@ -1,6 +1,7 @@
 import {
   ref,
   set,
+  update,
   onValue,
   onDisconnect,
   serverTimestamp,
@@ -8,6 +9,9 @@ import {
 import type { DataSnapshot, Database } from 'firebase/database';
 import { rtdb } from './firebase';
 import type { PresenceData } from '../types';
+
+// Users with lastSeen older than this are considered stale (ghost sessions)
+const STALE_THRESHOLD_MS = 8_000;
 
 // Get presence reference for a user in a room
 const getPresenceRef = (roomId: string, userId: string) => {
@@ -34,12 +38,10 @@ export async function setUserOnline(
   userName: string,
   color: string
 ): Promise<void> {
-  console.error('[Presence] setUserOnline:', { roomId, userId, userName });
   const presenceRef = getPresenceRef(roomId, userId);
 
   // MUST await onDisconnect before writing online=true,
   // otherwise the server may not have the cleanup handler registered.
-  console.error('[Presence] Registering onDisconnect...');
   await onDisconnect(presenceRef).set({
     userId,
     userName,
@@ -47,7 +49,6 @@ export async function setUserOnline(
     online: false,
     lastSeen: serverTimestamp(),
   });
-  console.error('[Presence] onDisconnect registered. Writing online=true...');
 
   await set(presenceRef, {
     userId,
@@ -56,7 +57,15 @@ export async function setUserOnline(
     online: true,
     lastSeen: serverTimestamp(),
   });
-  console.error('[Presence] setUserOnline: DONE');
+}
+
+// Lightweight heartbeat — only updates lastSeen timestamp
+export async function heartbeatPresence(
+  roomId: string,
+  userId: string
+): Promise<void> {
+  const presenceRef = getPresenceRef(roomId, userId);
+  await update(presenceRef, { lastSeen: serverTimestamp() });
 }
 
 // Set user as offline (only used for explicit page unload, NOT for effect cleanup)
@@ -81,25 +90,23 @@ export function subscribeToPresence(
   roomId: string,
   onChange: (users: PresenceData[]) => void
 ): () => void {
-  console.error('[Presence] Subscribing to path: presence/' + roomId);
   const presenceRef = getRoomPresenceRef(roomId);
 
   const unsubscribe = onValue(presenceRef, (snapshot: DataSnapshot) => {
     const users: PresenceData[] = [];
     const data = snapshot.val();
-    console.error('[Presence] Snapshot received, raw data:', data ? Object.keys(data).length + ' users' : 'null');
 
     if (data) {
+      const now = Date.now();
       Object.values(data).forEach((user) => {
         const presence = user as PresenceData;
-        console.error('[Presence] User entry:', presence.userName, 'online:', presence.online);
-        if (presence.online) {
+        const age = now - presence.lastSeen;
+        if (presence.online && age < STALE_THRESHOLD_MS) {
           users.push(presence);
         }
       });
     }
 
-    console.error('[Presence] Online users:', users.length, users.map(u => u.userName));
     onChange(users);
   }, (error) => {
     console.error('[Presence] Subscription error:', error);
