@@ -10,7 +10,13 @@ const MAX_COMMAND_LENGTH = 500;
 const MAX_CANVAS_OBJECTS = 200;
 const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
 const RATE_LIMIT_MAX_REQUESTS = 10;
-const FETCH_TIMEOUT_MS = 55_000; // 55s — complex multi-shape requests need 30-50s of model generation
+const SIMPLE_FETCH_TIMEOUT_MS = 30_000;  // Haiku completes in 2-4s
+const COMPLEX_FETCH_TIMEOUT_MS = 85_000; // Sonnet + extended thinking needs up to 80s
+
+function classifyComplexity(command: string): "simple" | "complex" {
+  const compositionNouns = /\b(dog|cat|horse|bird|fish|animal|person|human|man|woman|boy|girl|people|house|building|castle|car|truck|bus|robot|flower|tree|garden|park|town|village|farm|zoo|scene|composition|landscape|smiley|face|snowman)(?:e?s)?\b/i;
+  return compositionNouns.test(command) ? "complex" : "simple";
+}
 
 const VALID_TYPES = new Set([
   "rect", "circle", "line", "triangle", "hexagon", "star", "sticky", "textbox",
@@ -94,26 +100,26 @@ WORKED EXAMPLE — Cat face:
 WORKED EXAMPLE — Dog:
   anchor = (400, 300)
 
-  Head:      center = anchor + (0, -30) = (400, 270).      circle r=60.     → x=340, y=210, color=#C4863C
-  Body:      center = anchor + (0, 70) = (400, 370).       circle r=50.     → x=350, y=320, color=#C4863C
-  Left ear:  center = anchor + (-65, -25) = (335, 275).    circle r=20.     → x=315, y=255, color=#8B5E2B
-  Right ear: center = anchor + (65, -25) = (465, 275).     circle r=20.     → x=445, y=255, color=#8B5E2B
-  Left eye:  center = anchor + (-18, -40) = (382, 260).    circle r=6.      → x=376, y=254, color=#000000
-  Right eye: center = anchor + (18, -40) = (418, 260).     circle r=6.      → x=412, y=254, color=#000000
-  Snout:     center = anchor + (0, -10) = (400, 290).      circle r=18.     → x=382, y=272, color=#DEB887
-  Nose:      center = anchor + (0, -18) = (400, 282).      circle r=6.      → x=394, y=276, color=#000000
-  Tail:      center = anchor + (55, 55) = (455, 355).      triangle 20×30.  → x=445, y=340, color=#C4863C
-  L front leg: center = anchor + (-15, 115) = (385, 415).  rect 12×30.      → x=379, y=400, color=#C4863C
-  R front leg: center = anchor + (15, 115) = (415, 415).   rect 12×30.      → x=409, y=400, color=#C4863C
-  L back leg:  center = anchor + (-12, 125) = (388, 425).  rect 12×30.      → x=382, y=410, color=#C4863C
-  R back leg:  center = anchor + (12, 125) = (412, 425).   rect 12×30.      → x=406, y=410, color=#C4863C
+  Head:      center = anchor + (0, -30) = (400, 270).    circle r=60.     → x=340, y=210, color=#C4863C
+  Body:      center = anchor + (0, 70) = (400, 370).     circle r=50.     → x=350, y=320, color=#C4863C
+  Left ear:  center = anchor + (-55, 10) = (345, 310).   circle r=22.     → x=323, y=288, color=#8B5E2B
+  Right ear: center = anchor + (55, 10) = (455, 310).    circle r=22.     → x=433, y=288, color=#8B5E2B
+  Left eye:  center = anchor + (-20, -42) = (380, 258).  circle r=7.      → x=373, y=251, color=#000000
+  Right eye: center = anchor + (20, -42) = (420, 258).   circle r=7.      → x=413, y=251, color=#000000
+  Snout:     center = anchor + (0, -8) = (400, 292).     circle r=20.     → x=380, y=272, color=#DEB887
+  Nose:      center = anchor + (0, -16) = (400, 284).    circle r=5.      → x=395, y=279, color=#000000
+  Mouth:     center = anchor + (0, 2) = (400, 302).      circle r=4.      → x=396, y=298, color=#000000
+  Tail:      center = anchor + (55, 50) = (455, 350).    triangle 20×30.  → x=445, y=335, color=#C4863C
+  L front leg: center = anchor + (-20, 118) = (380, 418). rect 14×35.    → x=373, y=401, color=#C4863C
+  R front leg: center = anchor + (20, 118) = (420, 418).  rect 14×35.    → x=413, y=401, color=#C4863C
+  L back leg:  center = anchor + (-15, 128) = (385, 428). rect 14×30.    → x=378, y=413, color=#C4863C
+  R back leg:  center = anchor + (15, 128) = (415, 428).  rect 14×30.    → x=408, y=413, color=#C4863C
 
-  CHECK: ears BESIDE head (floppy), not on top. Ear center y=275 ≈ head center y=270? ✓ (within 5px)
-  CHECK: ears OUTSIDE head edge? |335-400|=65 > r=60? ✓ (ears stick out to sides)
-  CHECK: eyes at y=260 inside head center y=270 r=60? |260-270|=10 < 60 ✓
-  CHECK: snout at y=290 inside head? |290-270|=20 < 60 ✓
-  CHECK: 4 legs present below body? leg top y=400, body bottom y=370+50=420. Legs overlap body bottom ✓
-  NOTE: Body similar or smaller than head for cartoon style. Dog ears are FLOPPY (beside head, not on top).
+  CHECK: ears DROOP from sides? Ear center y=310, head center y=270. Ears 40px BELOW center ✓
+  CHECK: ears stick out from head? Ear extends to x=323, head edge x=340. Ears hang out ✓
+  CHECK: eyes in upper half? eye y=258, head center y=270. Eyes above center ✓
+  CHECK: 4 legs visible below body? Leg top y=401, body bottom y=420. Legs extend to y=436 ✓
+  NOTE: FLOPPY ears = deltaY POSITIVE (below center). Bear ears = deltaY NEGATIVE (above center). Dogs MUST use positive deltaY for ears.
 
 WORKED EXAMPLE — House:
   anchor = (400, 200)
@@ -122,7 +128,7 @@ WORKED EXAMPLE — House:
   Body:         center = anchor + (0, 35) = (400, 235).   rect 180×140.    → x=310, y=165, color=#DEB887
   Left window:  center = anchor + (-45, 10) = (355, 210). rect 35×25.      → x=338, y=198, color=#87CEEB
   Right window: center = anchor + (45, 10) = (445, 210).  rect 35×25.      → x=428, y=198, color=#87CEEB
-  Door:         center = anchor + (0, 78) = (400, 278).   rect 35×55.      → x=383, y=250, color=#5C3317
+  Door:         center = anchor + (0, 78) = (400, 278).   rect 45×55.      → x=378, y=250, color=#5C3317
 
   CHECK: roof base (y=125+40=165) aligns with body top (y=165)? ✓
   CHECK: roof width (220) >= body width (180)? ✓
@@ -160,10 +166,12 @@ Humanoid (person, robot, alien):
 Quadruped (dog, cat, horse):
   HEAD → circle at anchor + (0, -offset)
   BODY → circle at anchor + (0, +offset), similar size to head
-  EARS → circles on head sides at head-center y-level (dog/floppy) or above head (cat/pointed)
-  LEGS → 4 small rects below body bottom, spaced symmetrically (REQUIRED — never omit)
+  EARS → Dog: circles BELOW head center (deltaY = +5 to +15), hanging off sides → floppy look
+         Cat: triangles ABOVE head (deltaY negative) → pointed look
+  LEGS → 4 rects below body bottom, at least 30px tall (REQUIRED — never omit)
   SNOUT → lighter circle on lower face (REQUIRED for dogs)
-  Rules: head overlaps body top by ~10%, dog ears at head center y ± 5px (NOT at top of head)
+  MOUTH → small dark circle below snout
+  Rules: head overlaps body top by ~10%. DOG ears MUST have positive deltaY (droop down). Cat ears have negative deltaY (point up).
 
 Building (house, tower):
   ROOF → at anchor + (0, -(bodyH/2 + roofH/2))
@@ -194,34 +202,41 @@ If your output has fewer parts than the minimum, you MUST add the missing parts 
 MULTI-OBJECT SCENES:
 When a prompt asks for multiple distinct objects (e.g. "house with 2 dogs", "park with trees and people"):
 1. Plan the SCENE LAYOUT first — decide the primary object (usually the largest/most important) and secondary objects.
-2. SCALE secondary objects relative to the primary: dogs are ~1/4 house height, people are ~1/3 house height, trees are ~2/3 house height.
-3. Use a SINGLE scene anchor. Place the primary object at/near the anchor, and position secondaries around it using offsets.
-4. REDUCE radii and dimensions for smaller items. Do NOT reuse standalone example sizes. E.g. a dog next to a house: head r=20, body r=15, ears r=7, eyes r=2.
+2. SCALE secondary objects to be CLEARLY VISIBLE: dogs ~1/3 house height, people ~1/3 house height, trees ~2/3 house height.
+3. MINIMUM SIZES — these are hard limits, never go below:
+   - Animal head: radius >= 25
+   - Animal body: radius >= 18
+   - Animal ears: radius >= 8
+   - Eyes: radius >= 3
+   - Legs: at least 8×20
+   Tiny shapes are invisible on the canvas. Always err on the side of LARGER.
+4. Use a SINGLE scene anchor. Place the primary object at/near the anchor, and position secondaries around it using offsets.
 5. Use stroke: "none" on sub-parts of compositions to avoid disconnected blue outlines.
 
 WORKED EXAMPLE — House with dog:
   scene anchor = (400, 300)
 
-  HOUSE (primary, centered above):
-    Roof:    triangle 180×70  at (310, 165), color=#8B4513, stroke="none"
-    Body:    rect 150×120     at (325, 240), color=#DEB887, stroke="none"
-    Window1: rect 30×25       at (330, 255), color=#87CEEB, stroke=#5B7DB1
-    Window2: rect 30×25       at (400, 255), color=#87CEEB, stroke=#5B7DB1
-    Door:    rect 30×50       at (385, 315), color=#5C3317, stroke="none"
+  HOUSE (primary, centered):
+    Roof:    triangle 200×80  at (300, 155), color=#8B4513, stroke="none"
+    Body:    rect 160×130     at (320, 235), color=#DEB887, stroke="none"
+    Window1: rect 30×25       at (340, 260), color=#87CEEB, stroke=#5B7DB1
+    Window2: rect 30×25       at (420, 260), color=#87CEEB, stroke=#5B7DB1
+    Door:    rect 40×55       at (380, 315), color=#5C3317, stroke="none"
 
-  DOG (secondary, front-right, ~1/4 house size):
-    Head:    circle r=20 at (500, 360), color=#C4863C, stroke="none"
-    Body:    circle r=15 at (505, 395), color=#C4863C, stroke="none"
-    L ear:   circle r=7  at (501, 361), color=#8B5E2B, stroke="none"
-    R ear:   circle r=7  at (525, 361), color=#8B5E2B, stroke="none"
-    L eye:   circle r=2  at (513, 374), color=#000000, stroke="none"
-    R eye:   circle r=2  at (523, 374), color=#000000, stroke="none"
-    Nose:    circle r=2  at (518, 382), color=#000000, stroke="none"
-    Tail:    triangle 8×12 at (536, 393), color=#C4863C, stroke="none"
-    L front leg: rect 5×12 at (496, 408), color=#C4863C, stroke="none"
-    R front leg: rect 5×12 at (510, 408), color=#C4863C, stroke="none"
-    L back leg:  rect 5×12 at (498, 420), color=#C4863C, stroke="none"
-    R back leg:  rect 5×12 at (512, 420), color=#C4863C, stroke="none"
+  DOG (secondary, right side, ~1/3 house height):
+    Head:    circle r=28 at (532, 310), color=#C4863C, stroke="none"
+    Body:    circle r=22 at (537, 368), color=#C4863C, stroke="none"
+    L ear:   circle r=10 at (528, 342), color=#8B5E2B, stroke="none"
+    R ear:   circle r=10 at (568, 342), color=#8B5E2B, stroke="none"
+    L eye:   circle r=3  at (548, 320), color=#000000, stroke="none"
+    R eye:   circle r=3  at (562, 320), color=#000000, stroke="none"
+    Snout:   circle r=10 at (553, 336), color=#DEB887, stroke="none"
+    Nose:    circle r=3  at (556, 332), color=#000000, stroke="none"
+    Tail:    triangle 12×18 at (576, 360), color=#C4863C, stroke="none"
+    L front leg: rect 8×22 at (530, 388), color=#C4863C, stroke="none"
+    R front leg: rect 8×22 at (546, 388), color=#C4863C, stroke="none"
+    L back leg:  rect 8×20 at (533, 405), color=#C4863C, stroke="none"
+    R back leg:  rect 8×20 at (549, 405), color=#C4863C, stroke="none"
 
 COLOR GUIDANCE:
 - Use appealing colors. Hex codes only.
@@ -468,6 +483,130 @@ function sanitizeCanvasObjects(objects: unknown[]): SanitizedObject[] {
   return result;
 }
 
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  maxRetries = 2
+): Promise<Response> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, options);
+      if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
+        await response.text().catch(() => {});
+        if (options.signal && (options.signal as AbortSignal).aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        const delay = 1000 * Math.pow(2, attempt);
+        console.log(`[aiProxy] Retry ${attempt + 1}/${maxRetries} after ${response.status}, waiting ${delay}ms`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      return response;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") throw err;
+      if (attempt === maxRetries) throw err;
+      const delay = 1000 * Math.pow(2, attempt);
+      console.log(`[aiProxy] Retry ${attempt + 1}/${maxRetries} after error, waiting ${delay}ms`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw new Error("fetchWithRetry: unreachable");
+}
+
+async function processStreamingResponse(
+  response: Response,
+  docRef: admin.firestore.DocumentReference
+): Promise<{ functionCalls: Array<{ name: string; args: Record<string, unknown> }>; text: string }> {
+  const body = response.body;
+  if (!body) throw new Error("No response body for streaming");
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const reader = (body as any).getReader() as {
+    read(): Promise<{ done: boolean; value?: Uint8Array }>;
+    releaseLock(): void;
+  };
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  let currentBlockType = "";
+  let currentToolName = "";
+  let inputJsonParts: string[] = [];
+  const functionCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  let text = "";
+  let lastWriteCount = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      while (true) {
+        const eventEnd = buffer.indexOf("\n\n");
+        if (eventEnd === -1) break;
+
+        const eventBlock = buffer.slice(0, eventEnd);
+        buffer = buffer.slice(eventEnd + 2);
+
+        let eventType = "";
+        let dataStr = "";
+        for (const line of eventBlock.split("\n")) {
+          if (line.startsWith("event: ")) eventType = line.slice(7).trim();
+          else if (line.startsWith("data: ")) dataStr += line.slice(6);
+        }
+
+        if (!eventType || !dataStr) continue;
+
+        let data: Record<string, unknown>;
+        try { data = JSON.parse(dataStr); } catch { continue; }
+
+        if (eventType === "content_block_start") {
+          const block = data.content_block as Record<string, unknown> | undefined;
+          if (block) {
+            currentBlockType = String(block.type || "");
+            if (currentBlockType === "tool_use") {
+              currentToolName = String(block.name || "");
+              inputJsonParts = [];
+            }
+          }
+        } else if (eventType === "content_block_delta") {
+          const delta = data.delta as Record<string, unknown> | undefined;
+          if (delta) {
+            if (currentBlockType === "tool_use" && delta.type === "input_json_delta") {
+              inputJsonParts.push(String(delta.partial_json || ""));
+            } else if (currentBlockType === "text" && delta.type === "text_delta") {
+              text += String(delta.text || "");
+            }
+          }
+        } else if (eventType === "content_block_stop") {
+          if (currentBlockType === "tool_use" && VALID_TOOL_NAMES.has(currentToolName)) {
+            const fullJson = inputJsonParts.join("");
+            try {
+              const args = JSON.parse(fullJson) as Record<string, unknown>;
+              functionCalls.push({ name: currentToolName, args });
+              if (functionCalls.length >= lastWriteCount + 3) {
+                await docRef.update({ partialFunctionCalls: functionCalls });
+                lastWriteCount = functionCalls.length;
+              }
+            } catch {
+              console.warn(`[aiProxy] Malformed tool JSON for ${currentToolName}`);
+            }
+          }
+          currentBlockType = "";
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (functionCalls.length > lastWriteCount) {
+    await docRef.update({ partialFunctionCalls: functionCalls });
+  }
+
+  return { functionCalls, text };
+}
+
 export const aiProxy = onDocumentCreated(
   {
     document: "rooms/{roomId}/aiRequests/{requestId}",
@@ -586,14 +725,15 @@ ${objectList || "(empty canvas)"}
 
 <user_command>${command}</user_command>`;
 
-      // Fetch with timeout
+      const isComplex = classifyComplexity(command) === "complex";
+      const fetchTimeoutMs = isComplex ? COMPLEX_FETCH_TIMEOUT_MS : SIMPLE_FETCH_TIMEOUT_MS;
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+      const timeoutId = setTimeout(() => controller.abort(), fetchTimeoutMs);
 
       const fetchStart = Date.now();
       let response: Response;
       try {
-        response = await fetch("https://api.anthropic.com/v1/messages", {
+        response = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -601,20 +741,25 @@ ${objectList || "(empty canvas)"}
             "anthropic-version": "2023-06-01",
           },
           body: JSON.stringify({
-            model: "claude-sonnet-4-5-20250929",
-            max_tokens: 4096,
-            system: SYSTEM_PROMPT,
+            model: isComplex ? "claude-sonnet-4-5-20250929" : "claude-haiku-4-5-20251001",
+            max_tokens: isComplex ? 12000 : 4096,
+            system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
             tools,
             messages: [{ role: "user", content: userMessage }],
+            ...(isComplex
+              ? { thinking: { type: "enabled", budget_tokens: 3000 }, stream: true }
+              : { tool_choice: { type: "any" }, temperature: 0.5 }),
           }),
           signal: controller.signal,
         });
-      } finally {
+      } catch (fetchErr) {
         clearTimeout(timeoutId);
+        throw fetchErr;
       }
       const fetchMs = Date.now() - fetchStart;
 
       if (!response.ok) {
+        clearTimeout(timeoutId);
         let errorBody = "";
         try { errorBody = await response.text(); } catch { /* ignore */ }
         console.error(`[aiProxy] Anthropic API error: status=${response.status} after ${fetchMs}ms, body=${errorBody.slice(0, 500)}`);
@@ -626,30 +771,37 @@ ${objectList || "(empty canvas)"}
         return;
       }
 
-      const result = await response.json();
+      let functionCalls: Array<{ name: string | undefined; args: Record<string, unknown> | undefined }>;
+      let text: string;
 
-      const content = result.content as AnthropicContent[];
+      if (isComplex) {
+        ({ functionCalls, text } = await processStreamingResponse(response, docRef));
+        clearTimeout(timeoutId);
+      } else {
+        clearTimeout(timeoutId);
+        const result = await response.json();
+        const content = result.content as AnthropicContent[];
 
-      // Filter tool calls to only allow known tool names
-      const functionCalls = content
-        .filter(
-          (block) =>
-            block.type === "tool_use" &&
-            typeof block.name === "string" &&
-            VALID_TOOL_NAMES.has(block.name)
-        )
-        .map((block) => ({
-          name: block.name,
-          args: block.input,
-        }));
+        functionCalls = content
+          .filter(
+            (block) =>
+              block.type === "tool_use" &&
+              typeof block.name === "string" &&
+              VALID_TOOL_NAMES.has(block.name)
+          )
+          .map((block) => ({
+            name: block.name,
+            args: block.input,
+          }));
 
-      const text = content
-        .filter((block) => block.type === "text")
-        .map((block) => block.text)
-        .join("");
+        text = content
+          .filter((block) => block.type === "text")
+          .map((block) => block.text)
+          .join("");
+      }
 
       const totalMs = Date.now() - t0;
-      console.log(`[aiProxy] Completed in ${totalMs}ms (API ${fetchMs}ms): ${functionCalls.length} tool calls, ${text.length} chars text`);
+      console.log(`[aiProxy] Completed in ${totalMs}ms (API ${fetchMs}ms, ${isComplex ? "streaming" : "batch"}): ${functionCalls.length} tool calls, ${text.length} chars text`);
 
       await docRef.update({
         status: "completed",

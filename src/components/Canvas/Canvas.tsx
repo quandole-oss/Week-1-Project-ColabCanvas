@@ -2683,7 +2683,7 @@ function getObjectProps(obj: FabricObject): CanvasObjectProps {
     left: left,
     top: top,
     fill: obj.fill as string,
-    stroke: highlightOriginal ? (highlightOriginal.stroke as string) : (obj.stroke as string),
+    stroke: (highlightOriginal ? highlightOriginal.stroke : obj.stroke) as string ?? 'transparent',
     strokeWidth: highlightOriginal ? highlightOriginal.strokeWidth : obj.strokeWidth,
     angle: absAngle ?? obj.angle,
     scaleX: obj.scaleX,

@@ -56,10 +56,15 @@ export async function syncObject(
   const objectRef = doc(db, 'rooms', roomId, 'objects', objectId);
   const now = Timestamp.now();
 
+  // Strip undefined values — Firestore rejects them
+  const cleanProps = Object.fromEntries(
+    Object.entries(props).filter(([, v]) => v !== undefined)
+  ) as CanvasObjectProps;
+
   const data: Partial<CanvasObject> = {
     id: objectId,
     type,
-    props,
+    props: cleanProps,
     zIndex,
     updatedBy: userId,
     updatedAt: now,

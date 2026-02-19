@@ -430,7 +430,7 @@ export function executeAIAction(
         height: isSticky ? (height ?? 200) : isTextbox ? (height ?? 40) : (height ?? 100),
         radius: radius ?? 50,
         fill: isSticky ? (color ?? '#FEF3C7') : isTextbox ? '' : (color ?? '#3B82F6'),
-        stroke: isTextElement ? undefined : (
+        stroke: isTextElement ? 'transparent' : (
           stroke === 'none' || stroke === 'transparent' ? 'transparent' : (stroke ?? '#1E40AF')
         ),
         strokeWidth: isTextElement ? 0 : (
