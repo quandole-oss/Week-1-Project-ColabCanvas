@@ -55,9 +55,21 @@ export function useAIAgent({
         const viewportCenter = getViewportCenter?.() || { x: 400, y: 300 };
         let result: string;
 
-        if (isGeminiConfigured()) {
+        // Try local parser first for instant response on commands it can handle
+        const localResult = tryLocalCommand(
+          command,
+          canvasObjects,
+          createObject,
+          updateObject,
+          deleteObject,
+          clearAllObjects,
+          getViewportCenter
+        );
+
+        if (localResult !== null) {
+          result = localResult;
+        } else if (isGeminiConfigured()) {
           try {
-            // Use cloud AI for intelligent command processing
             const selectedIds = getSelectedObjectIds?.() ?? [];
             result = await processGeminiCommand(
               command,
@@ -72,29 +84,13 @@ export function useAIAgent({
           } catch (cloudErr) {
             const errMsg = cloudErr instanceof Error ? cloudErr.message : String(cloudErr);
             console.error('[AI] Cloud AI error:', errMsg);
-
-            // Only fall back to local for simple shape commands the local parser can handle
-            const isSimple = /\b(rect|circle|triangle|square|star|hexagon|grid|sticky|note|login|nav|textbox|text\s*box)\b/i.test(command);
-            if (isSimple) {
-              result = processLocalCommand(
-                command,
-                canvasObjects,
-                createObject,
-                updateObject,
-                deleteObject,
-                clearAllObjects,
-                getViewportCenter
-              );
-            } else {
-              throw new Error(
-                errMsg.includes('timed out')
-                  ? 'AI is taking longer than expected. Please try again in a moment.'
-                  : `AI request failed: ${errMsg}`
-              );
-            }
+            throw new Error(
+              errMsg.includes('timed out')
+                ? 'AI is taking longer than expected. Please try again in a moment.'
+                : `AI request failed: ${errMsg}`
+            );
           }
         } else {
-          // Fall back to local regex parser (no API key needed)
           result = processLocalCommand(
             command,
             canvasObjects,
@@ -297,7 +293,65 @@ function parseCount(command: string): number {
   return 1;
 }
 
-// Local command processing for demo without API key
+// Returns true if the local parser can confidently handle this command
+function canHandleLocally(command: string): boolean {
+  const lc = command.toLowerCase();
+
+  // Templates
+  if (/swot/i.test(lc)) return true;
+  if (lc.includes('login') && /form|page|screen/.test(lc)) return true;
+  if (/\bnav\b|menu bar|header/.test(lc)) return true;
+
+  // Arrange / layout
+  if (/arrange|align|line up/.test(lc) && !/and\s+(create|make|add|draw)/.test(lc)) return true;
+
+  // Delete / clear
+  if (/delete all|clear all|remove all|clear canvas|clear everything/.test(lc)) return true;
+
+  // Grid creation
+  if (lc.includes('grid') && !/(arrange|align)/.test(lc)) return true;
+
+  // Textbox / sticky
+  if (/textbox|text\s*box|text\s*field/.test(lc)) return true;
+  if (/sticky|(?<!\w)note(?!\w)/.test(lc)) return true;
+
+  // Basic shape creation (not complex compositions like "dog", "house")
+  const hasCompositionNoun = /\b(dog|cat|horse|bird|fish|animal|person|human|man|woman|boy|girl|people|house|building|castle|car|truck|bus|robot|flower|tree|garden|park|town|village|farm|zoo|scene|composition|landscape|smiley|face|snowman)(?:e?s)?\b/i;
+  if (hasCompositionNoun.test(lc)) return false;
+
+  if (/\b(rect|rectangle|square|box|circle|oval|dot|triangle|hexagon|star|line)s?\b/i.test(lc)) return true;
+
+  return false;
+}
+
+// Try local command — returns null if the command needs cloud AI
+function tryLocalCommand(
+  command: string,
+  canvasObjects: Map<string, CanvasObject>,
+  createObject: (type: ShapeType, props: CanvasObjectProps) => string,
+  updateObject: (id: string, props: Partial<CanvasObjectProps>) => void,
+  deleteObject: (id: string) => void,
+  clearAllObjects?: () => number,
+  getViewportCenter?: () => { x: number; y: number }
+): string | null {
+  // Multi-step: split on "and then" / "then" / semicolons
+  const steps = command.split(/\s*(?:;\s*|,?\s+and then\s+|,?\s+then\s+)/i).filter(Boolean);
+  if (steps.length > 1) {
+    const allLocal = steps.every(s => canHandleLocally(s));
+    if (!allLocal) return null;
+    const results: string[] = [];
+    for (const step of steps) {
+      const r = processLocalCommand(step, canvasObjects, createObject, updateObject, deleteObject, clearAllObjects, getViewportCenter);
+      results.push(r);
+    }
+    return results.join('\n');
+  }
+
+  if (!canHandleLocally(command)) return null;
+  return processLocalCommand(command, canvasObjects, createObject, updateObject, deleteObject, clearAllObjects, getViewportCenter);
+}
+
+// Local command processing — handles templates & simple shapes instantly
 function processLocalCommand(
   command: string,
   canvasObjects: Map<string, CanvasObject>,
@@ -310,11 +364,15 @@ function processLocalCommand(
   const lowerCommand = command.toLowerCase();
   const results: string[] = [];
 
-  // Get viewport center for positioning
   const viewportCenter = getViewportCenter?.() || { x: 400, y: 300 };
 
+  // SWOT analysis — 4 labeled quadrants
+  if (/swot/i.test(lowerCommand)) {
+    return createSWOTAnalysis(createObject, viewportCenter);
+  }
+
   // Parse grid creation first (more specific)
-  if (lowerCommand.includes('grid')) {
+  if (lowerCommand.includes('grid') && !/arrange|align/.test(lowerCommand)) {
     const gridMatch = command.match(/(\d+)\s*[xX×]\s*(\d+)/);
     const rows = gridMatch ? parseInt(gridMatch[1]) : 3;
     const cols = gridMatch ? parseInt(gridMatch[2]) : 3;
@@ -323,7 +381,6 @@ function processLocalCommand(
     const cellSize = Math.min(width, height, 60);
     const spacing = 20;
 
-    // Calculate grid start position to center it on viewport
     const gridWidth = cols * (cellSize + spacing) - spacing;
     const gridHeight = rows * (cellSize + spacing) - spacing;
     const startX = viewportCenter.x - gridWidth / 2;
@@ -368,37 +425,59 @@ function processLocalCommand(
     return result.message;
   }
 
-  // Parse arrange/align commands
+  // Arrange in a grid / row / column — use actual object dimensions
   if (lowerCommand.includes('arrange') || lowerCommand.includes('align') || lowerCommand.includes('line up')) {
     const objectIds = Array.from(canvasObjects.keys());
     if (objectIds.length === 0) {
       return 'No objects to arrange. Create some objects first.';
     }
 
-    const layout = (lowerCommand.includes('row') || lowerCommand.includes('horizontal'))
-      ? 'row'
-      : (lowerCommand.includes('column') || lowerCommand.includes('vertical'))
-      ? 'column'
-      : (lowerCommand.includes('grid'))
-      ? 'grid'
-      : 'row';
+    const layout: 'row' | 'column' | 'grid' =
+      (lowerCommand.includes('row') || lowerCommand.includes('horizontal')) ? 'row'
+      : (lowerCommand.includes('column') || lowerCommand.includes('vertical')) ? 'column'
+      : 'grid';
 
-    const action: AIAction = {
-      type: 'arrangeObjects',
-      params: { objectIds, layout, spacing: 20, startX: 100, startY: 100 },
-    };
-    const result = executeAIAction(action, canvasObjects, createObject, updateObject, deleteObject);
-    return result.message;
+    const spacing = 20;
+    const cols = Math.max(2, Math.ceil(Math.sqrt(objectIds.length)));
+    let x = viewportCenter.x - 200;
+    let y = viewportCenter.y - 200;
+    let col = 0;
+    let rowMaxH = 0;
+
+    for (const id of objectIds) {
+      const obj = canvasObjects.get(id);
+      if (!obj) continue;
+      const w = obj.props.width ?? 100;
+      const h = obj.props.height ?? 100;
+
+      updateObject(id, { left: x, top: y });
+
+      if (layout === 'row') {
+        x += w + spacing;
+      } else if (layout === 'column') {
+        y += h + spacing;
+      } else {
+        rowMaxH = Math.max(rowMaxH, h);
+        col++;
+        if (col >= cols) {
+          col = 0;
+          x = viewportCenter.x - 200;
+          y += rowMaxH + spacing;
+          rowMaxH = 0;
+        } else {
+          x += w + spacing;
+        }
+      }
+    }
+    return `Arranged ${objectIds.length} objects in a ${layout} layout`;
   }
 
   // Parse delete/clear commands
   if (lowerCommand.includes('delete all') || lowerCommand.includes('clear all') || lowerCommand.includes('remove all') || lowerCommand.includes('clear canvas') || lowerCommand.includes('clear everything')) {
-    // Use clearAllObjects if available (more reliable)
     if (clearAllObjects) {
       const count = clearAllObjects();
       return count > 0 ? `Deleted ${count} objects` : 'No objects to delete.';
     }
-    // Fallback to deleting from canvasObjects map
     const objectIds = Array.from(canvasObjects.keys());
     if (objectIds.length === 0) {
       return 'No objects to delete.';
@@ -423,7 +502,6 @@ function processLocalCommand(
   // Parse sticky note creation (check before general shape patterns)
   if (lowerCommand.includes('sticky') || lowerCommand.includes('note')) {
     const pos = parsePosition(command, viewportCenter);
-    // Extract quoted text: "saying 'Hello'" or 'with text "Hello"'
     const textMatch = command.match(/(?:saying|with text|text|:)\s*['"]([^'"]+)['"]/i);
     const text = textMatch ? textMatch[1] : '';
     const action: AIAction = {
@@ -442,7 +520,6 @@ function processLocalCommand(
     /(?:create|make|add|draw|place)\s+(?:a\s+)?(?:(\d+)\s+)?(\w+)?\s*(hexagon)/i,
     /(?:create|make|add|draw|place)\s+(?:a\s+)?(?:(\d+)\s+)?(\w+)?\s*(star)/i,
     /(?:create|make|add|draw|place)\s+(?:a\s+)?(?:(\d+)\s+)?(\w+)?\s*(line)/i,
-    // Also match "red rectangle", "blue circle" without create verb
     /(?:a\s+)?(\d+)?\s*(\w+)?\s*(rectangle|rect|square|box|circle|oval|dot|triangle|hexagon|star|line)s?/i,
   ];
 
@@ -471,7 +548,6 @@ function processLocalCommand(
         shapeType = 'rect';
       }
 
-      // Create multiple shapes if count > 1
       for (let i = 0; i < count; i++) {
         const offsetX = count > 1 ? i * (size.width + 20) : 0;
 
@@ -497,18 +573,51 @@ function processLocalCommand(
     }
   }
 
-  // If we got here, we didn't understand the command
   return `I'll try to help! Here are some things I can do:
 • "Create a red rectangle" or "blue circle"
 • "Make 3 green triangles"
-• "Create a yellow star" or "purple hexagon"
-• "Create a sticky note" or "Create a note saying 'Hello'"
-• "Create a textbox" or "Create a text box saying 'Hello'"
+• "Create a SWOT analysis"
+• "Create a sticky note saying 'Hello'"
 • "Create a 3x3 grid"
-• "Create a large circle at center"
-• "Create a small blue rectangle at top left"
 • "Create a login form"
 • "Create a navigation bar"
-• "Arrange objects in a row"
-• "Delete all objects"`;
+• "Arrange in a grid" or "Arrange in a row"
+• "Delete all objects"
+• Multi-step: "Create a circle and then arrange in a grid"`;
+}
+
+function createSWOTAnalysis(
+  createObject: (type: ShapeType, props: CanvasObjectProps) => string,
+  center: { x: number; y: number }
+): string {
+  const qW = 220;
+  const qH = 180;
+  const gap = 4;
+  const baseX = center.x - qW - gap / 2;
+  const baseY = center.y - qH - gap / 2;
+
+  const quadrants: Array<{ label: string; fill: string; col: number; row: number }> = [
+    { label: 'Strengths',     fill: '#22C55E', col: 0, row: 0 },
+    { label: 'Weaknesses',    fill: '#EF4444', col: 1, row: 0 },
+    { label: 'Opportunities', fill: '#3B82F6', col: 0, row: 1 },
+    { label: 'Threats',       fill: '#F59E0B', col: 1, row: 1 },
+  ];
+
+  for (const q of quadrants) {
+    const left = baseX + q.col * (qW + gap);
+    const top = baseY + q.row * (qH + gap);
+
+    createObject('rect', {
+      left, top, width: qW, height: qH,
+      fill: q.fill, stroke: '#1E293B', strokeWidth: 2,
+    });
+
+    createObject('textbox', {
+      left: left + 10, top: top + 10, width: qW - 20, height: 30,
+      fill: '', text: q.label, fontSize: 18, fontFamily: 'sans-serif', textColor: '#FFFFFF',
+      stroke: 'transparent', strokeWidth: 0,
+    });
+  }
+
+  return 'Created SWOT analysis with 4 labeled quadrants (Strengths, Weaknesses, Opportunities, Threats)';
 }
