@@ -28,6 +28,7 @@ export function Room({ roomId }: RoomProps) {
   const objectCountRef = useRef(0);
   const aiInputRef = useRef<HTMLInputElement>(null);
   const [getViewportCenter, setGetViewportCenter] = useState<(() => { x: number; y: number }) | null>(null);
+  const [copied, setCopied] = useState(false);
   const addToHistoryRef = useRef<((entry: HistoryEntry) => void) | null>(null);
   // Batch history entries for AI operations (so multiple objects undo together)
   const batchEntriesRef = useRef<HistoryEntry[]>([]);
@@ -41,6 +42,40 @@ export function Room({ roomId }: RoomProps) {
 
   // Sanitize display name for security
   const safeDisplayName = sanitizeDisplayName(user.displayName);
+
+  const handleCopyRoomId = useCallback(() => {
+    const id = roomId;
+    try {
+      navigator.clipboard.writeText(id).then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }).catch(() => {
+        // Fallback for browsers that block clipboard API
+        const ta = document.createElement('textarea');
+        ta.value = id;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      });
+    } catch {
+      // Sync fallback
+      const ta = document.createElement('textarea');
+      ta.value = id;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }, [roomId]);
 
   const { remoteCursors, broadcastCursor } = useCursorSync({
     roomId,
@@ -264,7 +299,13 @@ export function Room({ roomId }: RoomProps) {
       <div className="absolute top-0 left-0 right-0 h-12 bg-white/70 backdrop-blur-md border-b border-white/20 shadow-sm flex items-center justify-between px-4 z-40">
         <div className="flex items-center gap-3">
           <h1 className="text-gray-800 font-semibold">Collaborative Canvas</h1>
-          <span className="text-gray-500 text-sm">Room: {roomId}</span>
+          <button
+            onClick={handleCopyRoomId}
+            className="text-gray-500 text-sm hover:text-gray-700 cursor-pointer transition-colors"
+            title="Click to copy Room ID"
+          >
+            {copied ? 'Copied!' : `Room: ${roomId}`}
+          </button>
         </div>
         <div className="flex items-center gap-4">
           <span className="text-gray-700 text-sm">
