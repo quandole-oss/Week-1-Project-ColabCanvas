@@ -1,10 +1,12 @@
 import { onDocumentCreated, onDocumentDeleted } from "firebase-functions/v2/firestore";
 import { defineSecret } from "firebase-functions/params";
 import * as admin from "firebase-admin";
+import { Client, RunTree } from "langsmith";
 
 admin.initializeApp();
 
 const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
+const langsmithApiKey = defineSecret("LANGSMITH_API_KEY");
 
 const MAX_COMMAND_LENGTH = 500;
 const MAX_CANVAS_OBJECTS = 200;
@@ -610,7 +612,7 @@ async function processStreamingResponse(
 export const aiProxy = onDocumentCreated(
   {
     document: "rooms/{roomId}/aiRequests/{requestId}",
-    secrets: [anthropicApiKey],
+    secrets: [anthropicApiKey, langsmithApiKey],
     maxInstances: 10,
     timeoutSeconds: 90,
   },
@@ -705,6 +707,33 @@ export const aiProxy = onDocumentCreated(
     console.log(`[aiProxy] Processing command="${command.slice(0, 80)}" for user=${userId}`);
     await docRef.update({ status: "processing" });
 
+    let langsmithKey: string | undefined;
+    try {
+      langsmithKey = langsmithApiKey.value();
+    } catch {
+      langsmithKey = undefined;
+    }
+    let run: RunTree | null = null;
+    if (langsmithKey) {
+      try {
+        const client = new Client({ apiKey: langsmithKey });
+        run = new RunTree({
+          name: "aiProxy",
+          run_type: "chain",
+          client,
+          project_name: "collaborative-canvas",
+          inputs: {
+            command: command.slice(0, 300),
+            isComplex: classifyComplexity(command) === "complex",
+            objectCount: objects.length,
+            roomId: event.params.roomId,
+          },
+        });
+      } catch (e) {
+        console.warn("[aiProxy] LangSmith run create failed:", e);
+      }
+    }
+
     try {
       const objectList = objects
         .map((obj) => {
@@ -763,6 +792,7 @@ ${objectList || "(empty canvas)"}
         let errorBody = "";
         try { errorBody = await response.text(); } catch { /* ignore */ }
         console.error(`[aiProxy] Anthropic API error: status=${response.status} after ${fetchMs}ms, body=${errorBody.slice(0, 500)}`);
+        if (run) await run.end(undefined, `API ${response.status}: ${errorBody.slice(0, 200)}`).catch(() => {});
         await docRef.update({
           status: "error",
           error: `AI service error (${response.status}). Please try again.`,
@@ -803,6 +833,15 @@ ${objectList || "(empty canvas)"}
       const totalMs = Date.now() - t0;
       console.log(`[aiProxy] Completed in ${totalMs}ms (API ${fetchMs}ms, ${isComplex ? "streaming" : "batch"}): ${functionCalls.length} tool calls, ${text.length} chars text`);
 
+      if (run) {
+        await run.end({
+          toolCalls: functionCalls.length,
+          textLength: text.length,
+          totalMs,
+          fetchMs,
+        }).catch((e) => console.warn("[aiProxy] LangSmith end failed:", e));
+      }
+
       await docRef.update({
         status: "completed",
         result: { functionCalls, text },
@@ -812,6 +851,7 @@ ${objectList || "(empty canvas)"}
       const totalMs = Date.now() - t0;
       if (error instanceof DOMException && error.name === "AbortError") {
         console.error(`[aiProxy] Anthropic API timed out after ${totalMs}ms`);
+        if (run) await run.end(undefined, "Timeout").catch(() => {});
         await docRef.update({
           status: "error",
           error: "AI request timed out. Please try again.",
@@ -820,6 +860,7 @@ ${objectList || "(empty canvas)"}
         return;
       }
       console.error(`[aiProxy] Unexpected error after ${totalMs}ms:`, error);
+      if (run) await run.end(undefined, String(error)).catch(() => {});
       await docRef.update({
         status: "error",
         error: "An unexpected error occurred",
