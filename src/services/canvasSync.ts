@@ -106,7 +106,7 @@ export async function syncObjectPartial(
 // split-second inconsistency when moving a multi-object selection.
 export async function batchSyncObjectsPartial(
   roomId: string,
-  entries: Array<{ id: string; props: Partial<CanvasObjectProps> }>,
+  entries: Array<{ id: string; props: Partial<CanvasObjectProps>; zIndex?: number }>,
   userId: string
 ): Promise<void> {
   if (!db) throw new Error('Firestore not initialized');
@@ -120,6 +120,9 @@ export async function batchSyncObjectsPartial(
       if (value !== undefined) {
         update[`props.${key}`] = value;
       }
+    }
+    if (entry.zIndex !== undefined) {
+      update['zIndex'] = entry.zIndex;
     }
     batch.update(objectRef, update);
   }

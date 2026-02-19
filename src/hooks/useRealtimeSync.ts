@@ -173,7 +173,17 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
             // Skip if user is currently editing this object (optimistic lock)
             if (editingObjectIds.current.has(obj.id)) return;
             // Skip if user is actively selecting/manipulating this object (LWW guard)
-            if (activeObjectIds.current.has(obj.id)) return;
+            // BUT still accept zIndex changes so layer reordering syncs across tabs
+            if (activeObjectIds.current.has(obj.id)) {
+              setObjects((prev) => {
+                const existing = prev.get(obj.id);
+                if (!existing || existing.zIndex === obj.zIndex) return prev;
+                const next = new Map(prev);
+                next.set(obj.id, { ...existing, zIndex: obj.zIndex });
+                return next;
+              });
+              return;
+            }
 
             setObjects((prev) => {
               const next = new Map(prev);
@@ -357,6 +367,12 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
     async (entries: Array<{ id: string; props: CanvasObjectProps }>) => {
       if (entries.length === 0) return;
 
+      // Capture current zIndex for each entry before state update (for self-healing sync)
+      const entriesWithZIndex = entries.map((entry) => {
+        const obj = objectsRef.current.get(entry.id);
+        return { ...entry, zIndex: obj?.zIndex };
+      });
+
       // Single local state update for all entries
       setObjects((prev) => {
         const next = new Map(prev);
@@ -385,7 +401,7 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
           );
         }
         try {
-          await batchSyncObjectsPartial(roomId, entries, odId);
+          await batchSyncObjectsPartial(roomId, entriesWithZIndex, odId);
         } catch (error) {
           console.error('Failed to batch-sync objects:', error);
         }

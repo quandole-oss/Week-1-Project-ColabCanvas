@@ -8,7 +8,7 @@ import { CanvasToolbar } from './CanvasToolbar';
 import { CursorOverlay } from './CursorOverlay';
 import type { CanvasObjectProps, ShapeType, CursorState, CanvasObject } from '../../types';
 import { getAbsolutePosition } from '../../utils/canvasPosition';
-import { computeBatchZIndex, type ZIndexAction } from '../../utils/zIndex';
+import { computeBatchZIndex, computeNewZIndex, type ZIndexAction } from '../../utils/zIndex';
 
 // History entry for undo (supports single or batch operations)
 export interface HistoryEntry {
@@ -90,6 +90,8 @@ export function Canvas({
   const editingTextboxRef = useRef<{ id: string; obj: Textbox } | null>(null);
   // Pending AI-created object IDs to auto-select after sync
   const pendingSelectionIdsRef = useRef<string[]>([]);
+  // Track zIndex signature to avoid restacking on every remoteObjects change
+  const zIndexSignatureRef = useRef<string>('');
 
   const {
     fabricRef,
@@ -135,6 +137,45 @@ export function Canvas({
   // then commit a single history entry when changes stop.
   const colorDragStartRef = useRef<{ objectId: string; props: CanvasObjectProps } | null>(null);
   const colorHistoryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Restack Fabric objects by zIndex with deterministic tie-breaking
+  const restackCanvasObjects = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas || !remoteObjects) return;
+
+    const userObjects = canvas.getObjects().filter(
+      (o) => (o as FabricObject & { id?: string }).id
+    );
+    if (userObjects.length <= 1) {
+      sendGridToBack(canvas);
+      return;
+    }
+
+    // Sort by zIndex, tie-break by updatedAt then id for determinism
+    const sorted = userObjects
+      .map((fabricObj) => {
+        const id = (fabricObj as FabricObject & { id?: string }).id!;
+        const remote = remoteObjects.get(id);
+        return {
+          fabricObj,
+          zIndex: remote?.zIndex ?? 0,
+          updatedAt: remote?.updatedAt?.toMillis?.() ?? 0,
+          id,
+        };
+      })
+      .sort((a, b) =>
+        a.zIndex - b.zIndex
+        || a.updatedAt - b.updatedAt
+        || a.id.localeCompare(b.id)
+      );
+
+    // Count non-user objects (grid lines) to offset indices
+    const gridCount = canvas.getObjects().length - userObjects.length;
+    for (let i = 0; i < sorted.length; i++) {
+      canvas.moveObjectTo(sorted[i].fabricObj, gridCount + i);
+    }
+    sendGridToBack(canvas);
+  }, [fabricRef, remoteObjects]);
 
   // Add to history (defined early so effects can use it)
   const addToHistory = useCallback((entry: HistoryEntry) => {
@@ -801,13 +842,14 @@ export function Canvas({
       canvas.renderAll();
       onObjectsZIndexChanged?.(entries);
     } else {
-      // Single object: existing logic
+      if (!remoteObjects) return;
       const id = (activeObj as FabricObject & { id?: string }).id;
       if (!id) return;
       fabricAction(activeObj);
       sendGridToBack(canvas);
-      const newIdx = canvas.getObjects().indexOf(activeObj);
-      onObjectZIndexChanged?.(id, newIdx);
+      const allObjects = Array.from(remoteObjects.values()).map((o) => ({ id: o.id, zIndex: o.zIndex }));
+      const newZIndex = computeNewZIndex(allObjects, id, action);
+      onObjectZIndexChanged?.(id, newZIndex);
     }
   }, [fabricRef, remoteObjects, onObjectZIndexChanged, onObjectsZIndexChanged]);
 
@@ -1881,6 +1923,23 @@ export function Canvas({
 
     canvas.renderAll();
   }, [fabricRef, remoteObjects, setTool]);
+
+  // Restack Fabric objects by zIndex — only when zIndex values actually change
+  useEffect(() => {
+    const canvas = fabricRef.current;
+    if (!canvas || !remoteObjects) return;
+
+    // Derive a stable signature from zIndex values (sorted by id for consistency)
+    const signature = Array.from(remoteObjects.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([id, obj]) => `${id}:${obj.zIndex ?? 0}`)
+      .join(',');
+
+    if (signature === zIndexSignatureRef.current) return;
+    zIndexSignatureRef.current = signature;
+
+    restackCanvasObjects();
+  }, [fabricRef, remoteObjects, restackCanvasObjects]);
 
 
   // Detect when remote objects stop moving by tracking position changes
