@@ -51,22 +51,38 @@ export function getTopLeftPosition(obj: PositionableObject): { left: number; top
 }
 
 /**
- * Get absolute top-left position for an object that may be inside an ActiveSelection.
- * When inside a group, child.left/top are relative to the group center — NOT absolute.
- * This uses calcTransformMatrix() to get the true canvas position.
+ * Get absolute top-left position (and combined angle) for an object that may
+ * be inside an ActiveSelection.  When inside a group, child.left/top are
+ * relative to the group center — NOT absolute.
+ *
+ * Fabric.js's `translateToOriginPoint` rotates the center→origin offset by the
+ * object's angle.  We must replicate that rotation here so the stored left/top
+ * matches what Fabric would set after the object exits the group.
  */
-export function getAbsolutePosition(obj: PositionableObject): { left: number; top: number } {
+export function getAbsolutePosition(obj: PositionableObject): { left: number; top: number; angle?: number } {
   if (!obj.group || !obj.calcTransformMatrix) return getTopLeftPosition(obj);
 
   const matrix = obj.calcTransformMatrix();
-  // matrix[4], matrix[5] = absolute center of the object in canvas space
+  const centerX = matrix[4];
+  const centerY = matrix[5];
+
+  const sx = Math.sqrt(matrix[0] * matrix[0] + matrix[1] * matrix[1]);
+  const sy = sx !== 0
+    ? (matrix[0] * matrix[3] - matrix[2] * matrix[1]) / sx
+    : Math.sqrt(matrix[2] * matrix[2] + matrix[3] * matrix[3]);
+
   const w = obj.width ?? 0;
   const h = obj.height ?? 0;
-  // Extract effective scale from the full transform matrix
-  const sx = Math.sqrt(matrix[0] * matrix[0] + matrix[1] * matrix[1]);
-  const sy = Math.sqrt(matrix[2] * matrix[2] + matrix[3] * matrix[3]);
+  const halfW = (w * sx) / 2;
+  const halfH = (h * sy) / 2;
+
+  const angle = Math.atan2(matrix[1], matrix[0]);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+
   return {
-    left: matrix[4] - (w * sx) / 2,
-    top: matrix[5] - (h * sy) / 2,
+    left: centerX - halfW * cos + halfH * sin,
+    top:  centerY - halfW * sin - halfH * cos,
+    angle: angle * (180 / Math.PI),
   };
 }

@@ -10,7 +10,14 @@ interface AICommandInputProps {
 export function AICommandInput({ onSubmit, isProcessing, messages, inputRef }: AICommandInputProps) {
   const [input, setInput] = useState('');
   const [isExpanded, setIsExpanded] = useState(false);
+  const [elapsedSec, setElapsedSec] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isProcessing) { setElapsedSec(0); return; }
+    const id = setInterval(() => setElapsedSec((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [isProcessing]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -58,7 +65,7 @@ export function AICommandInput({ onSubmit, isProcessing, messages, inputRef }: A
             {isProcessing && (
               <div className="text-gray-500 text-xs flex items-center gap-1.5">
                 <span className="animate-pulse">●</span>
-                Thinking...
+                Thinking{elapsedSec >= 3 ? ` (${elapsedSec}s)` : '...'}
               </div>
             )}
             <div ref={messagesEndRef} />

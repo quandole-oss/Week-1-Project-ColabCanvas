@@ -15,6 +15,7 @@ interface UseAIAgentOptions {
   startHistoryBatch?: () => void;
   endHistoryBatch?: () => void;
   reorderObject?: (id: string, action: ZIndexAction) => void;
+  getSelectedObjectIds?: () => string[];
 }
 
 interface AIMessage {
@@ -32,6 +33,7 @@ export function useAIAgent({
   startHistoryBatch,
   endHistoryBatch,
   reorderObject,
+  getSelectedObjectIds,
 }: UseAIAgentOptions) {
   const [messages, setMessages] = useState<AIMessage[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -56,6 +58,7 @@ export function useAIAgent({
         if (isGeminiConfigured()) {
           try {
             // Use cloud AI for intelligent command processing
+            const selectedIds = getSelectedObjectIds?.() ?? [];
             result = await processGeminiCommand(
               command,
               canvasObjects,
@@ -63,20 +66,32 @@ export function useAIAgent({
               updateObject,
               deleteObject,
               viewportCenter,
-              reorderObject
+              reorderObject,
+              selectedIds
             );
-          } catch {
-            // Cloud AI failed — fall back to local regex parser
-            console.warn('[AI] Cloud AI unavailable, using local parser');
-            result = processLocalCommand(
-              command,
-              canvasObjects,
-              createObject,
-              updateObject,
-              deleteObject,
-              clearAllObjects,
-              getViewportCenter
-            );
+          } catch (cloudErr) {
+            const errMsg = cloudErr instanceof Error ? cloudErr.message : String(cloudErr);
+            console.error('[AI] Cloud AI error:', errMsg);
+
+            // Only fall back to local for simple shape commands the local parser can handle
+            const isSimple = /\b(rect|circle|triangle|square|star|hexagon|grid|sticky|note|login|nav|textbox|text\s*box)\b/i.test(command);
+            if (isSimple) {
+              result = processLocalCommand(
+                command,
+                canvasObjects,
+                createObject,
+                updateObject,
+                deleteObject,
+                clearAllObjects,
+                getViewportCenter
+              );
+            } else {
+              throw new Error(
+                errMsg.includes('timed out')
+                  ? 'AI is taking longer than expected. Please try again in a moment.'
+                  : `AI request failed: ${errMsg}`
+              );
+            }
           }
         } else {
           // Fall back to local regex parser (no API key needed)
@@ -106,7 +121,7 @@ export function useAIAgent({
         setIsProcessing(false);
       }
     },
-    [canvasObjects, createObject, updateObject, deleteObject, clearAllObjects, getViewportCenter, startHistoryBatch, endHistoryBatch, reorderObject]
+    [canvasObjects, createObject, updateObject, deleteObject, clearAllObjects, getViewportCenter, startHistoryBatch, endHistoryBatch, reorderObject, getSelectedObjectIds]
   );
 
   const clearMessages = useCallback(() => {

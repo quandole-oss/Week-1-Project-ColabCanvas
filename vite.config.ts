@@ -19,6 +19,11 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/anthropic/, ''),
       },
+      '/__dbg': {
+        target: 'http://127.0.0.1:7242',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/__dbg/, ''),
+      },
     },
   },
 })

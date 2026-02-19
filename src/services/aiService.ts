@@ -40,6 +40,14 @@ export const AI_TOOLS = [
             type: 'string',
             description: 'Fill color of the shape (hex code like #FF0000)',
           },
+          stroke: {
+            type: 'string',
+            description: 'Stroke/border color (hex code like #FF0000, or "none" for no border)',
+          },
+          strokeWidth: {
+            type: 'number',
+            description: 'Stroke width in pixels (default 2, use 0 for no border)',
+          },
           text: {
             type: 'string',
             description: 'Text content for sticky notes',
@@ -121,6 +129,43 @@ export const AI_TOOLS = [
           },
         },
         required: ['objectId', 'degrees'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'updateObject',
+      description: 'Update visual properties of an existing object (color, stroke, text, opacity)',
+      parameters: {
+        type: 'object',
+        properties: {
+          objectId: {
+            type: 'string',
+            description: 'The ID of the object to update',
+          },
+          fill: {
+            type: 'string',
+            description: 'New fill color (hex code)',
+          },
+          stroke: {
+            type: 'string',
+            description: 'New stroke/border color (hex code)',
+          },
+          strokeWidth: {
+            type: 'number',
+            description: 'New stroke width in pixels',
+          },
+          opacity: {
+            type: 'number',
+            description: 'Opacity from 0 to 1',
+          },
+          text: {
+            type: 'string',
+            description: 'New text content (for sticky/textbox)',
+          },
+        },
+        required: ['objectId'],
       },
     },
   },
@@ -326,7 +371,7 @@ export function parseFunctionCalls(functionCalls: Array<{
 
 const VALID_ACTION_TYPES = new Set([
   'createShape', 'moveObject', 'resizeObject', 'rotateObject',
-  'deleteObject', 'arrangeObjects', 'createLoginForm',
+  'updateObject', 'deleteObject', 'arrangeObjects', 'createLoginForm',
   'createNavigationBar', 'getCanvasState',
   'duplicateObject', 'reorderObject',
 ]);
@@ -352,7 +397,7 @@ export function executeAIAction(
 
   switch (type) {
     case 'createShape': {
-      const { type: shapeType, x: rawX, y: rawY, width, height, radius, color, text } = params as {
+      const { type: shapeType, x: rawX, y: rawY, width, height, radius, color, text, stroke, strokeWidth } = params as {
         type: ShapeType;
         x: number;
         y: number;
@@ -361,6 +406,8 @@ export function executeAIAction(
         radius?: number;
         color?: string;
         text?: string;
+        stroke?: string;
+        strokeWidth?: number;
       };
 
       if (typeof shapeType !== 'string' || !VALID_SHAPE_TYPES.has(shapeType)) {
@@ -383,8 +430,12 @@ export function executeAIAction(
         height: isSticky ? (height ?? 200) : isTextbox ? (height ?? 40) : (height ?? 100),
         radius: radius ?? 50,
         fill: isSticky ? (color ?? '#FEF3C7') : isTextbox ? '' : (color ?? '#3B82F6'),
-        stroke: isTextElement ? undefined : '#1E40AF',
-        strokeWidth: isTextElement ? 0 : 2,
+        stroke: isTextElement ? undefined : (
+          stroke === 'none' || stroke === 'transparent' ? 'transparent' : (stroke ?? '#1E40AF')
+        ),
+        strokeWidth: isTextElement ? 0 : (
+          stroke === 'none' || stroke === 'transparent' ? 0 : (strokeWidth ?? 2)
+        ),
         ...(isTextElement ? { text: text ?? '', fontSize: 16, fontFamily: 'sans-serif', textColor: isTextbox ? (color ?? '#000000') : '#000000' } : {}),
       };
 
@@ -439,6 +490,31 @@ export function executeAIAction(
 
       updateObject(objectId, { angle: degrees });
       return { success: true, message: `Rotated object to ${degrees} degrees` };
+    }
+
+    case 'updateObject': {
+      const { objectId, fill, stroke, strokeWidth, opacity, text } = params as {
+        objectId: string;
+        fill?: string;
+        stroke?: string;
+        strokeWidth?: number;
+        opacity?: number;
+        text?: string;
+      };
+
+      if (!canvasObjects.has(objectId)) {
+        return { success: false, message: `Object ${objectId} not found` };
+      }
+
+      const updates: Partial<CanvasObjectProps> = {};
+      if (fill !== undefined) updates.fill = fill;
+      if (stroke !== undefined) updates.stroke = stroke;
+      if (strokeWidth !== undefined) updates.strokeWidth = strokeWidth;
+      if (opacity !== undefined) updates.opacity = opacity;
+      if (text !== undefined) updates.text = text;
+
+      updateObject(objectId, updates);
+      return { success: true, message: `Updated object ${objectId}` };
     }
 
     case 'deleteObject': {
@@ -673,6 +749,10 @@ Position reference:
 - Top-right: (600, 100)
 - Bottom-left: (100, 500)
 - Bottom-right: (600, 500)
+
+MODIFYING EXISTING OBJECTS:
+When asked to change color, fill, stroke, opacity, or text of an existing object, ALWAYS use updateObject — never delete and recreate.
+Example: "make this red" → updateObject(objectId, fill="#EF4444")
 
 For complex requests like "create a login form", use the specialized createLoginForm function.
 For arranging objects, use arrangeObjects with layout: row, column, or grid.`;

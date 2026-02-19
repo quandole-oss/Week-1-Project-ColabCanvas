@@ -105,6 +105,59 @@ describe('getAbsolutePosition with grouped objects', () => {
     expect(pos.left).not.toBe(obj.left);
     expect(pos.top).not.toBe(obj.top);
   });
+
+  it('accounts for rotation when computing top-left from center (45° rotation)', () => {
+    const angle = Math.PI / 4; // 45°
+    const cos45 = Math.cos(angle);
+    const sin45 = Math.sin(angle);
+    const obj = {
+      width: 100,
+      height: 100,
+      left: 0,
+      top: 0,
+      scaleX: 1,
+      scaleY: 1,
+      group: {},
+      calcTransformMatrix: () => [
+        cos45, sin45,
+        -sin45, cos45,
+        300, 300,
+      ],
+    };
+    const pos = getAbsolutePosition(obj);
+    // halfW = 50, halfH = 50
+    // left = 300 - 50*cos45 + 50*sin45 = 300 (offsets cancel for square at 45°)
+    // top  = 300 - 50*sin45 - 50*cos45 = 300 - 70.71 ≈ 229.29
+    expect(pos.left).toBeCloseTo(300, 1);
+    expect(pos.top).toBeCloseTo(300 - 50 * sin45 - 50 * cos45, 1);
+    expect(pos.angle).toBeCloseTo(45, 5);
+  });
+
+  it('returns combined angle from the transform matrix', () => {
+    const angle = Math.PI / 6; // 30°
+    const cos30 = Math.cos(angle);
+    const sin30 = Math.sin(angle);
+    const obj = {
+      width: 80,
+      height: 40,
+      left: 0,
+      top: 0,
+      scaleX: 1,
+      scaleY: 1,
+      group: {},
+      calcTransformMatrix: () => [
+        cos30, sin30,
+        -sin30, cos30,
+        200, 150,
+      ],
+    };
+    const pos = getAbsolutePosition(obj);
+    expect(pos.angle).toBeCloseTo(30, 5);
+    // Verify the position accounts for rotation
+    const halfW = 40, halfH = 20;
+    expect(pos.left).toBeCloseTo(200 - halfW * cos30 + halfH * sin30, 1);
+    expect(pos.top).toBeCloseTo(150 - halfW * sin30 - halfH * cos30, 1);
+  });
 });
 
 describe('getAbsolutePosition with standalone objects', () => {

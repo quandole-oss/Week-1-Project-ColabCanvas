@@ -562,6 +562,11 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
     activeObjectIds.current = ids ?? new Set();
   }, []);
 
+  // Read the current set of actively selected object IDs (for AI agent).
+  const getActiveObjectIds = useCallback((): string[] => {
+    return Array.from(activeObjectIds.current);
+  }, []);
+
   // Mark/unmark an object as being actively text-edited (optimistic lock).
   // While locked, incoming remote/sync updates for this object are ignored.
   // On unlock, a 2-second grace period keeps the lock active to absorb
@@ -597,5 +602,6 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
     updateObjectZIndex,
     batchUpdateObjectZIndices,
     setActiveObjectIds,
+    getActiveObjectIds,
   };
 }

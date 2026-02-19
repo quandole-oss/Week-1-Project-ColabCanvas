@@ -90,6 +90,8 @@ export function Canvas({
   const editingTextboxRef = useRef<{ id: string; obj: Textbox } | null>(null);
   // Pending AI-created object IDs to auto-select after sync
   const pendingSelectionIdsRef = useRef<string[]>([]);
+  // Suppress object:modified events during programmatic auto-select
+  const suppressModifiedRef = useRef(false);
   // Track zIndex signature to avoid restacking on every remoteObjects change
   const zIndexSignatureRef = useRef<string>('');
 
@@ -911,6 +913,7 @@ export function Canvas({
 
     // Record modification in history when interaction completes
     const handleObjectModified = (opt: { target: FabricObject }) => {
+      if (suppressModifiedRef.current) return;
       const obj = opt.target;
       // Handle ActiveSelection: create a batch history entry for all children
       if (obj instanceof ActiveSelection) {
@@ -1911,12 +1914,14 @@ export function Canvas({
         // All objects found on canvas — select them
         pendingSelectionIdsRef.current = [];
         fabricObjs.forEach((obj) => obj.setCoords());
+        suppressModifiedRef.current = true;
         if (fabricObjs.length === 1) {
           canvas.setActiveObject(fabricObjs[0]);
         } else {
           const selection = new ActiveSelection(fabricObjs, { canvas });
           canvas.setActiveObject(selection);
         }
+        suppressModifiedRef.current = false;
         setTool('select');
       }
     }
@@ -2515,7 +2520,9 @@ function updateFabricObject(fabricObj: FabricObject, obj: CanvasObject) {
   const hasHighlight = !!highlightedObj._remoteHighlightOriginal;
 
   // Animate position for smooth remote movement (avoids jumpy updates from latency)
-  const posChanged = fabricObj.left !== props.left || fabricObj.top !== props.top;
+  const dL = Math.abs((fabricObj.left ?? 0) - props.left);
+  const dT = Math.abs((fabricObj.top ?? 0) - props.top);
+  const posChanged = dL > 1 || dT > 1;
   if (posChanged && fabricObj.canvas) {
     fabricObj.animate(
       { left: props.left, top: props.top },
@@ -2526,6 +2533,7 @@ function updateFabricObject(fabricObj: FabricObject, obj: CanvasObject) {
       }
     );
   } else {
+    // Snap directly for sub-pixel changes (no visible animation)
     fabricObj.set({ left: props.left, top: props.top });
   }
 
@@ -2668,16 +2676,16 @@ function getObjectProps(obj: FabricObject): CanvasObjectProps {
   // Check if object has a remote highlight - if so, use original stroke values
   const highlightOriginal = (obj as FabricObject & { _remoteHighlightOriginal?: { stroke: string | null; strokeWidth: number } })._remoteHighlightOriginal;
 
-  // Get absolute top-left position (handles grouped & standalone objects)
-  const { left, top } = getAbsolutePosition(obj);
+  // Get absolute top-left position and combined angle (handles grouped & standalone objects)
+  const { left, top, angle: absAngle } = getAbsolutePosition(obj);
 
   const props: CanvasObjectProps = {
-    left: Math.round(left),
-    top: Math.round(top),
+    left: left,
+    top: top,
     fill: obj.fill as string,
     stroke: highlightOriginal ? (highlightOriginal.stroke as string) : (obj.stroke as string),
     strokeWidth: highlightOriginal ? highlightOriginal.strokeWidth : obj.strokeWidth,
-    angle: obj.angle,
+    angle: absAngle ?? obj.angle,
     scaleX: obj.scaleX,
     scaleY: obj.scaleY,
   };

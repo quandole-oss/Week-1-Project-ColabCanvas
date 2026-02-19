@@ -91,7 +91,7 @@ export function Room({ roomId }: RoomProps) {
     userColor: user.color,
   });
 
-  const { objects, isConnected, createObject, createObjects, updateObject, batchUpdateObjects, flushPendingUpdate, removeObject, clearAllObjects, setEditingObjectId, updateObjectZIndex, batchUpdateObjectZIndices, setActiveObjectIds } =
+  const { objects, isConnected, createObject, createObjects, updateObject, batchUpdateObjects, flushPendingUpdate, removeObject, clearAllObjects, setEditingObjectId, updateObjectZIndex, batchUpdateObjectZIndices, setActiveObjectIds, getActiveObjectIds } =
     useRealtimeSync({
       roomId,
       odId: user.uid,
@@ -216,6 +216,7 @@ export function Room({ roomId }: RoomProps) {
     startHistoryBatch,
     endHistoryBatch,
     reorderObject: aiReorderObject,
+    getSelectedObjectIds: getActiveObjectIds,
   });
 
   const handleObjectCreated = useCallback(

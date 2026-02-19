@@ -11,6 +11,7 @@ export interface CanvasObjectProps {
   fill?: string;
   stroke?: string;
   strokeWidth?: number;
+  opacity?: number;
   angle?: number;
   scaleX?: number;
   scaleY?: number;
