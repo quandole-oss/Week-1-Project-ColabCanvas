@@ -35,6 +35,10 @@ const SYSTEM_PROMPT = `You are an AI architect for a collaborative design canvas
 
 Available shapes: rect, circle, line, triangle, hexagon, star, sticky, textbox.
 
+TEXT TYPES:
+- textbox: Clean text with transparent background. Use for labels, titles, annotations, descriptions, and any text in compositions (charts, diagrams, UI mockups).
+- sticky: Yellow post-it note with background color. ONLY use when the user explicitly asks for a "sticky note" or "post-it".
+
 CRITICAL COORDINATE SYSTEM:
 - x and y are the TOP-LEFT corner of the shape's bounding box, NOT the center.
 - For a circle with radius R at position (x, y): its visual center is at (x + R, y + R).
@@ -300,7 +304,7 @@ const tools = [
         type: {
           type: "string",
           description:
-            "The type of shape: rect, circle, line, triangle, hexagon, star, or sticky",
+            "The type of shape: rect, circle, line, triangle, hexagon, star, sticky, or textbox. Use textbox for labels, titles, and annotations. Use sticky only when the user explicitly asks for a sticky/post-it note.",
         },
         x: { type: "number", description: "X position (left)" },
         y: { type: "number", description: "Y position (top)" },
@@ -315,7 +319,7 @@ const tools = [
         strokeWidth: { type: "number", description: "Stroke width in pixels (default 2, use 0 for no border)" },
         text: {
           type: "string",
-          description: "Text content (for sticky notes)",
+          description: "Text content (for textbox or sticky). Prefer textbox for labels/titles.",
         },
       },
       required: ["type", "x", "y"],

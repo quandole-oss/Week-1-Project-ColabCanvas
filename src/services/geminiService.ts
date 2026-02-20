@@ -24,6 +24,10 @@ const ENHANCED_SYSTEM_PROMPT = `You are an AI architect for a collaborative desi
 
 Available shapes: rect, circle, line, triangle, hexagon, star, sticky, textbox.
 
+TEXT TYPES:
+- textbox: Clean text with transparent background. Use for labels, titles, annotations, descriptions, and any text in compositions (charts, diagrams, UI mockups).
+- sticky: Yellow post-it note with background color. ONLY use when the user explicitly asks for a "sticky note" or "post-it".
+
 CRITICAL COORDINATE SYSTEM:
 - x and y are the TOP-LEFT corner of the shape's bounding box, NOT the center.
 - For a circle with radius R at position (x, y): its visual center is at (x + R, y + R).
@@ -285,7 +289,7 @@ const ANTHROPIC_TOOLS = [
     input_schema: {
       type: 'object' as const,
       properties: {
-        type: { type: 'string', enum: ['rect', 'circle', 'line', 'triangle', 'hexagon', 'star', 'sticky', 'textbox'], description: 'Shape type' },
+        type: { type: 'string', enum: ['rect', 'circle', 'line', 'triangle', 'hexagon', 'star', 'sticky', 'textbox'], description: 'Shape type. Use textbox for labels/titles/annotations. Use sticky only when user asks for a sticky note.' },
         x: { type: 'number', description: 'X position (left)' },
         y: { type: 'number', description: 'Y position (top)' },
         width: { type: 'number', description: 'Width (for rects, default 100)' },

@@ -2460,15 +2460,21 @@ function createFabricObject(obj: CanvasObject): FabricObject | null {
           originY: 'top',
         }
       );
-    case 'line':
+    case 'line': {
+      const lx1 = props.x1 ?? props.left ?? 0;
+      const ly1 = props.y1 ?? props.top ?? 0;
+      const lx2 = props.x2 ?? ((props.left ?? 0) + (props.width ?? 100));
+      const ly2 = props.y2 ?? ((props.top ?? 0) + (props.height ?? 0));
       return new Line(
-        [props.x1 ?? props.left, props.y1 ?? props.top,
-         props.x2 ?? (props.left + 100), props.y2 ?? props.top],
+        [lx1, ly1, lx2, ly2],
         {
           stroke: strokeColor,
           strokeWidth: strokeWidth,
+          originX: 'left',
+          originY: 'top',
         }
       );
+    }
     case 'sticky': {
       const stickyTb = new Textbox(props.text ?? '', {
         left: props.left,
