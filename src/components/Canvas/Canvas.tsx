@@ -32,7 +32,7 @@ interface CanvasProps {
   onFlushSync?: () => void;
   onEditingObjectChange?: (id: string | null) => void;
   onObjectDeleted?: (id: string) => void;
-  onCursorMove?: (x: number, y: number, selectedObjectIds?: string[] | null, isMoving?: boolean) => void;
+  onCursorMove?: (x: number, y: number, selectedObjectIds?: string[] | null, isMoving?: boolean, movingObjectPositions?: Record<string, { left: number; top: number; angle?: number }> | null) => void;
   onViewportCenterChange?: (getCenter: () => { x: number; y: number }) => void;
   onHistoryAddChange?: (addHistory: (entry: HistoryEntry) => void) => void;
   onObjectZIndexChanged?: (id: string, zIndex: number) => void;
@@ -75,6 +75,9 @@ export function Canvas({
   const remoteHighlightsRef = useRef<Map<string, { stroke: string | null; strokeWidth: number }>>(new Map());
   // Track objects pending deletion (to prevent sync from re-creating them)
   const pendingDeletionRef = useRef<Set<string>>(new Set());
+  // Track objects whose positions are being streamed via RTDB (skip Firestore reconciliation)
+  const rtdbControlledRef = useRef<Set<string>>(new Set());
+  const rtdbGraceRef = useRef<Map<string, number>>(new Map());
   const historyRef = useRef<HistoryEntry[]>([]);
   const redoHistoryRef = useRef<HistoryEntry[]>([]);
   const [canUndo, setCanUndo] = useState(false);
@@ -400,6 +403,7 @@ export function Canvas({
           if (fabricObj) {
             (fabricObj as FabricObject & { id: string }).id = subEntry.objectId;
             canvas.add(fabricObj);
+            remoteObjectsRef.current.set(subEntry.objectId, fabricObj);
             onObjectCreated?.(subEntry.objectId, subEntry.objectType, subEntry.props, subEntry.zIndex ?? 0);
           }
         } else if (subEntry.type === 'modify' && subEntry.previousProps) {
@@ -456,6 +460,7 @@ export function Canvas({
       if (fabricObj) {
         (fabricObj as FabricObject & { id: string }).id = entry.objectId;
         canvas.add(fabricObj);
+        remoteObjectsRef.current.set(entry.objectId, fabricObj);
         onObjectCreated?.(entry.objectId, entry.objectType, entry.props, entry.zIndex ?? 0);
       }
     } else if (entry.type === 'modify' && entry.previousProps) {
@@ -547,6 +552,7 @@ export function Canvas({
           if (fabricObj) {
             (fabricObj as FabricObject & { id: string }).id = subEntry.objectId;
             canvas.add(fabricObj);
+            remoteObjectsRef.current.set(subEntry.objectId, fabricObj);
             onObjectCreated?.(subEntry.objectId, subEntry.objectType, subEntry.props, subEntry.zIndex ?? 0);
           }
         } else if (subEntry.type === 'delete') {
@@ -601,6 +607,7 @@ export function Canvas({
       if (fabricObj) {
         (fabricObj as FabricObject & { id: string }).id = entry.objectId;
         canvas.add(fabricObj);
+        remoteObjectsRef.current.set(entry.objectId, fabricObj);
         onObjectCreated?.(entry.objectId, entry.objectType, entry.props, entry.zIndex ?? 0);
       }
     } else if (entry.type === 'delete') {
@@ -766,6 +773,7 @@ export function Canvas({
       if (fabricObj) {
         (fabricObj as FabricObject & { id: string }).id = id;
         canvas.add(fabricObj);
+        remoteObjectsRef.current.set(id, fabricObj);
         pastedFabricObjs.push(fabricObj);
         batchObjects.push({ id, type: item.type, props: newProps, zIndex: objectCountRef.current });
         historyEntries.push({
@@ -1142,21 +1150,51 @@ export function Canvas({
       return id ? [id] : [];
     };
 
-    // Broadcast when object starts moving (hide outline on remote)
+    const extractMovingPositions = (): Record<string, { left: number; top: number; angle?: number }> | null => {
+      const activeObject = canvas.getActiveObject();
+      if (!activeObject) return null;
+      const positions: Record<string, { left: number; top: number; angle?: number }> = {};
+      if (activeObject instanceof ActiveSelection) {
+        const children = activeObject.getObjects();
+        let count = 0;
+        for (const child of children) {
+          if (count >= 30) break;
+          const id = (child as FabricObject & { id?: string }).id;
+          if (!id) continue;
+          const abs = getAbsolutePosition(child);
+          positions[id] = { left: abs.left, top: abs.top, angle: abs.angle };
+          count++;
+        }
+      } else {
+        const id = (activeObject as FabricObject & { id?: string }).id;
+        if (id && activeObject.left !== undefined && activeObject.top !== undefined) {
+          positions[id] = { left: activeObject.left, top: activeObject.top, angle: activeObject.angle };
+        }
+      }
+      return Object.keys(positions).length > 0 ? positions : null;
+    };
+
     const handleObjectMoving = () => {
       const activeObject = canvas.getActiveObject();
       const ids = getActiveIds();
       if (ids.length > 0 && activeObject && activeObject.left !== undefined && activeObject.top !== undefined) {
-        onCursorMove(activeObject.left, activeObject.top, ids, true);
+        onCursorMove(activeObject.left, activeObject.top, ids, true, extractMovingPositions());
       }
     };
 
-    // Broadcast when object stops moving (show outline again)
+    const handleObjectScaling = () => {
+      const activeObject = canvas.getActiveObject();
+      const ids = getActiveIds();
+      if (ids.length > 0 && activeObject && activeObject.left !== undefined && activeObject.top !== undefined) {
+        onCursorMove(activeObject.left, activeObject.top, ids, true, null);
+      }
+    };
+
     const handleMotionEnd = () => {
       const activeObject = canvas.getActiveObject();
       const ids = getActiveIds();
       if (ids.length > 0 && activeObject && activeObject.left !== undefined && activeObject.top !== undefined) {
-        onCursorMove(activeObject.left, activeObject.top, ids, false);
+        onCursorMove(activeObject.left, activeObject.top, ids, false, null);
       }
     };
 
@@ -1164,7 +1202,7 @@ export function Canvas({
     canvas.on('selection:updated', handleSelectionCreated);
     canvas.on('selection:cleared', handleSelectionCleared);
     canvas.on('object:moving', handleObjectMoving);
-    canvas.on('object:scaling', handleObjectMoving);
+    canvas.on('object:scaling', handleObjectScaling);
     canvas.on('object:rotating', handleObjectMoving);
     canvas.on('object:modified', handleMotionEnd);
     canvas.on('mouse:up', handleMotionEnd); // Backup to ensure immediate response
@@ -1174,7 +1212,7 @@ export function Canvas({
       canvas.off('selection:updated', handleSelectionCreated);
       canvas.off('selection:cleared', handleSelectionCleared);
       canvas.off('object:moving', handleObjectMoving);
-      canvas.off('object:scaling', handleObjectMoving);
+      canvas.off('object:scaling', handleObjectScaling);
       canvas.off('object:rotating', handleObjectMoving);
       canvas.off('object:modified', handleMotionEnd);
       canvas.off('mouse:up', handleMotionEnd);
@@ -1507,6 +1545,7 @@ export function Canvas({
         (shape as FabricObject & { id: string }).id = id;
         currentShapeRef.current = shape;
         canvas.add(shape);
+        remoteObjectsRef.current.set(id, shape);
       }
     };
 
@@ -1611,6 +1650,7 @@ export function Canvas({
             }) as FabricObject & { id?: string };
             newShape.id = id;
             canvas.add(newShape);
+            if (id) remoteObjectsRef.current.set(id, newShape);
             currentShapeRef.current = newShape;
           }
           break;
@@ -1637,6 +1677,7 @@ export function Canvas({
             }) as FabricObject & { id?: string };
             newShape.id = id;
             canvas.add(newShape);
+            if (id) remoteObjectsRef.current.set(id, newShape);
             currentShapeRef.current = newShape;
           }
           break;
@@ -1835,6 +1876,50 @@ export function Canvas({
     };
   }, [fabricRef, tool, fillColor, strokeColor, fontSize, fontFamily, textColor, onObjectCreated, onObjectDeleted, setTool, addToHistory]);
 
+  // Apply RTDB-streamed object positions from remote users during drag
+  useEffect(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+
+    const nowControlled = new Set<string>();
+
+    remoteCursors.forEach((cursor) => {
+      if (cursor.isMoving && cursor.movingObjectPositions) {
+        for (const [objId, pos] of Object.entries(cursor.movingObjectPositions)) {
+          if (pendingDeletionRef.current.has(objId)) continue;
+          const fabricObj = remoteObjectsRef.current.get(objId);
+          if (!fabricObj) continue;
+          const update: Record<string, number> = { left: pos.left, top: pos.top };
+          if (pos.angle !== undefined) update.angle = pos.angle;
+          fabricObj.set(update);
+          fabricObj.setCoords();
+          nowControlled.add(objId);
+        }
+      }
+    });
+
+    // Objects that were being controlled but are no longer: start grace period
+    const GRACE_MS = 600;
+    rtdbControlledRef.current.forEach((id) => {
+      if (!nowControlled.has(id)) {
+        rtdbGraceRef.current.set(id, Date.now());
+      }
+    });
+    rtdbControlledRef.current = nowControlled;
+
+    // Clean up expired grace periods
+    const now = Date.now();
+    rtdbGraceRef.current.forEach((timestamp, id) => {
+      if (now - timestamp > GRACE_MS) {
+        rtdbGraceRef.current.delete(id);
+      }
+    });
+
+    if (nowControlled.size > 0) {
+      canvas.requestRenderAll();
+    }
+  }, [remoteCursors, fabricRef]);
+
   // Sync remote objects to canvas
   useEffect(() => {
     const canvas = fabricRef.current;
@@ -1845,10 +1930,30 @@ export function Canvas({
       if (pendingDeletionRef.current.has(id)) {
         return;
       }
+      // RTDB-controlled (actively being dragged): apply non-position props but
+      // preserve the RTDB-streamed position to avoid jitter during drag
+      if (rtdbControlledRef.current.has(id)) {
+        const existingFabric = remoteObjectsRef.current.get(id);
+        if (existingFabric) {
+          const positionPreserved = {
+            ...obj,
+            props: { ...obj.props, left: existingFabric.left ?? obj.props.left, top: existingFabric.top ?? obj.props.top },
+          };
+          updateFabricObject(existingFabric, positionPreserved);
+        }
+        return;
+      }
+      // Grace period (drag just ended): apply everything from Firestore
+      // including the final settled position
+      if (rtdbGraceRef.current.has(id)) {
+        const existingFabric = remoteObjectsRef.current.get(id);
+        if (existingFabric) {
+          updateFabricObject(existingFabric, obj);
+        }
+        return;
+      }
 
-      const existingLocal = canvas.getObjects().find(
-        (o) => (o as FabricObject & { id?: string }).id === id
-      );
+      const existingLocal = remoteObjectsRef.current.get(id);
 
       if (existingLocal) {
         // Skip if user is currently interacting with or editing this object,
@@ -1917,9 +2022,7 @@ export function Canvas({
     if (pendingSelectionIdsRef.current.length > 0) {
       const ids = pendingSelectionIdsRef.current;
       const fabricObjs = ids
-        .map((id) =>
-          canvas.getObjects().find((o) => (o as FabricObject & { id?: string }).id === id)
-        )
+        .map((id) => remoteObjectsRef.current.get(id))
         .filter(Boolean) as FabricObject[];
 
       if (fabricObjs.length === ids.length) {
@@ -2050,16 +2153,12 @@ export function Canvas({
     // Remove highlights from objects no longer selected by remote users
     remoteHighlightsRef.current.forEach((_original, objectId) => {
       if (!shouldHighlight.has(objectId)) {
-        const obj = canvas.getObjects().find(
-          (o) => (o as FabricObject & { id?: string }).id === objectId
-        ) as FabricObject & { _remoteHighlightOriginal?: { stroke: string | null; strokeWidth: number } };
+        const obj = remoteObjectsRef.current.get(objectId) as (FabricObject & { _remoteHighlightOriginal?: { stroke: string | null; strokeWidth: number } }) | undefined;
         if (obj && obj._remoteHighlightOriginal) {
-          // Restore from the object's property (may have been updated while highlighted)
           obj.set({
             stroke: obj._remoteHighlightOriginal.stroke,
             strokeWidth: obj._remoteHighlightOriginal.strokeWidth,
           });
-          // Clear the custom property
           delete obj._remoteHighlightOriginal;
         }
         remoteHighlightsRef.current.delete(objectId);
@@ -2074,9 +2173,7 @@ export function Canvas({
         // Skip if already highlighted
         if (remoteHighlightsRef.current.has(objectId)) {
           // Update highlight color if it changed
-          const obj = canvas.getObjects().find(
-            (o) => (o as FabricObject & { id?: string }).id === objectId
-          );
+          const obj = remoteObjectsRef.current.get(objectId);
           if (obj && obj.stroke !== selection.color) {
             obj.set({
               stroke: selection.color,
@@ -2086,11 +2183,8 @@ export function Canvas({
           continue;
         }
 
-        const obj = canvas.getObjects().find(
-          (o) => (o as FabricObject & { id?: string }).id === objectId
-        ) as FabricObject & { _remoteHighlightOriginal?: { stroke: string | null; strokeWidth: number } };
+        const obj = remoteObjectsRef.current.get(objectId) as (FabricObject & { _remoteHighlightOriginal?: { stroke: string | null; strokeWidth: number } }) | undefined;
         if (obj) {
-          // Store original stroke on the object itself (so getObjectProps can access it)
           const originalStroke = obj.stroke as string | null;
           const originalStrokeWidth = obj.strokeWidth ?? 2;
           obj._remoteHighlightOriginal = {
@@ -2224,10 +2318,7 @@ export function Canvas({
         // Position badge above the first object in the selection
         const firstId = selection.objectIds[0];
 
-        // Find the fabric object on the local canvas
-        const obj = canvas.getObjects().find(
-          (o) => (o as FabricObject & { id?: string }).id === firstId
-        );
+        const obj = remoteObjectsRef.current.get(firstId);
 
         if (obj) {
           const vpt = canvas.viewportTransform;
@@ -2545,7 +2636,7 @@ function updateFabricObject(fabricObj: FabricObject, obj: CanvasObject) {
     fabricObj.animate(
       { left: props.left, top: props.top },
       {
-        duration: 120,
+        duration: 100,
         onChange: () => fabricObj.canvas?.renderAll(),
         onComplete: () => fabricObj.setCoords(),
       }

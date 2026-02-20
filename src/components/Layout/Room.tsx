@@ -268,8 +268,8 @@ export function Room({ roomId }: RoomProps) {
   );
 
   const handleCursorMove = useCallback(
-    (x: number, y: number, selectedObjectIds?: string[] | null, isMoving?: boolean) => {
-      broadcastCursor(x, y, selectedObjectIds, isMoving);
+    (x: number, y: number, selectedObjectIds?: string[] | null, isMoving?: boolean, movingObjectPositions?: Record<string, { left: number; top: number; angle?: number }> | null) => {
+      broadcastCursor(x, y, selectedObjectIds, isMoving, movingObjectPositions);
     },
     [broadcastCursor]
   );

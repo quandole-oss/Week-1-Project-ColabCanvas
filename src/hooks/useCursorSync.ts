@@ -122,6 +122,7 @@ export function useCursorSync({
   const currentSelectionRef = useRef<string[] | null>(null);
   const lastPositionRef = useRef({ x: 0, y: 0 });
   const isMovingRef = useRef(false);
+  const movingPositionsRef = useRef<Record<string, { left: number; top: number; angle?: number }> | null>(null);
 
   // Send cursor state update
   const sendCursorUpdate = useCallback(() => {
@@ -134,16 +135,12 @@ export function useCursorSync({
       lastActive: Date.now(),
       selectedObjectIds: currentSelectionRef.current,
       isMoving: isMovingRef.current,
+      movingObjectPositions: isMovingRef.current ? movingPositionsRef.current : null,
     };
 
     if (isFirebaseConfigured) {
-      try {
-        updateCursor(roomId, cursorState);
-      } catch (error) {
-        // Silently ignore cursor broadcast failures
-      }
+      updateCursor(roomId, cursorState);
     } else if (broadcastChannel.current) {
-      // Demo mode: broadcast via BroadcastChannel
       broadcastChannel.current.postMessage({
         type: 'cursor-update',
         cursor: cursorState,
@@ -173,30 +170,31 @@ export function useCursorSync({
 
   // Broadcast cursor - selection/motion changes are immediate, position is throttled
   const broadcastCursor = useCallback(
-    (x: number, y: number, selectedObjectIds?: string[] | null, isMoving?: boolean) => {
-      // Always update position ref
+    (x: number, y: number, selectedObjectIds?: string[] | null, isMoving?: boolean, movingObjectPositions?: Record<string, { left: number; top: number; angle?: number }> | null) => {
       lastPositionRef.current = { x, y };
 
-      // Check if selection changed (array comparison)
       const selectionChanged = selectedObjectIds !== undefined &&
         JSON.stringify(selectedObjectIds) !== JSON.stringify(currentSelectionRef.current);
 
-      // Check if motion state changed
       const motionChanged = isMoving !== undefined &&
         isMoving !== isMovingRef.current;
 
-      // Update selection ref if provided
       if (selectedObjectIds !== undefined) {
         currentSelectionRef.current = selectedObjectIds;
       }
 
-      // Update motion ref if provided
       if (isMoving !== undefined) {
         isMovingRef.current = isMoving;
       }
 
-      // Selection/motion changes send immediately, position-only updates are throttled
-      if (selectionChanged || motionChanged) {
+      if (movingObjectPositions !== undefined) {
+        movingPositionsRef.current = movingObjectPositions;
+      }
+
+      // During active drag, always send immediately to minimize latency
+      if (isMoving && movingObjectPositions) {
+        sendCursorUpdate();
+      } else if (selectionChanged || motionChanged) {
         sendCursorUpdate();
       } else {
         throttledPositionUpdate(x, y);

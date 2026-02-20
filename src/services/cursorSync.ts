@@ -21,16 +21,16 @@ const getRoomCursorsRef = (roomId: string) => {
   return ref(rtdb as Database, `cursors/${roomId}`);
 };
 
-// Update cursor position
-export async function updateCursor(
+// Update cursor position (fire-and-forget — ephemeral data, no need to await)
+export function updateCursor(
   roomId: string,
   cursorState: CursorState
-): Promise<void> {
+): void {
   const cursorRef = getCursorRef(roomId, cursorState.userId);
-  await set(cursorRef, {
+  set(cursorRef, {
     ...cursorState,
     lastActive: Date.now(),
-  });
+  }).catch(() => {});
 }
 
 // Remove cursor on disconnect
@@ -42,13 +42,13 @@ export function setupCursorCleanup(
   onDisconnect(cursorRef).remove();
 }
 
-// Remove cursor manually
-export async function removeCursor(
+// Remove cursor manually (fire-and-forget)
+export function removeCursor(
   roomId: string,
   userId: string
-): Promise<void> {
+): void {
   const cursorRef = getCursorRef(roomId, userId);
-  await remove(cursorRef);
+  remove(cursorRef).catch(() => {});
 }
 
 // Subscribe to all cursors in a room

@@ -2,7 +2,7 @@ import { initializeApp } from 'firebase/app';
 import type { FirebaseApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import type { Auth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from 'firebase/firestore';
 import type { Firestore } from 'firebase/firestore';
 import { getDatabase } from 'firebase/database';
 import type { Database } from 'firebase/database';
@@ -36,7 +36,11 @@ if (isFirebaseConfigured) {
   try {
     app = initializeApp(firebaseConfig);
     auth = getAuth(app);
-    db = getFirestore(app);
+    db = initializeFirestore(app, {
+      localCache: persistentLocalCache({
+        tabManager: persistentMultipleTabManager()
+      })
+    });
     rtdb = getDatabase(app);
     googleProvider = new GoogleAuthProvider();
 

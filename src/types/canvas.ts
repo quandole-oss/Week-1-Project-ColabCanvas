@@ -46,6 +46,7 @@ export interface CursorState {
   lastActive: number;
   selectedObjectIds?: string[] | null;
   isMoving?: boolean;
+  movingObjectPositions?: Record<string, { left: number; top: number; angle?: number }> | null;
 }
 
 export interface Room {
