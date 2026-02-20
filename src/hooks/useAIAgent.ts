@@ -3,6 +3,7 @@ import type { CanvasObject, CanvasObjectProps, ShapeType } from '../types';
 import { executeAIAction } from '../services/aiService';
 import type { AIAction } from '../services/aiService';
 import { isGeminiConfigured, processGeminiCommand } from '../services/geminiService';
+import { findTemplate, executeTemplate } from '../services/templateRegistry';
 import type { ZIndexAction } from '../utils/zIndex';
 
 interface UseAIAgentOptions {
@@ -299,8 +300,8 @@ function parseCount(command: string): number {
 function canHandleLocally(command: string): boolean {
   const lc = command.toLowerCase();
 
-  // Templates
-  if (/swot/i.test(lc)) return true;
+  // Templates (registry-based + legacy)
+  if (findTemplate(lc)) return true;
   if (lc.includes('login') && /form|page|screen/.test(lc)) return true;
   if (/\bnav\b|menu bar|header/.test(lc)) return true;
 
@@ -458,15 +459,9 @@ function processLocalCommand(
     return `Scaled ${resized} object${resized === 1 ? '' : 's'} by ${scale}x`;
   }
 
-  // SWOT analysis — 4 labeled quadrants
-  if (/swot/i.test(lowerCommand)) {
-    return createSWOTAnalysis(createObject, viewportCenter);
-  }
-
-  // Bar chart template
-  if (/bar\s*chart/i.test(lowerCommand)) {
-    return createBarChartTemplate(createObject, viewportCenter);
-  }
+  // Template registry (SWOT, bar chart, flowchart, kanban, etc.)
+  const tpl = findTemplate(lowerCommand);
+  if (tpl) return executeTemplate(tpl, createObject, viewportCenter);
 
   // Parse grid creation first (more specific)
   if (lowerCommand.includes('grid') && !/arrange|align/.test(lowerCommand)) {
@@ -678,6 +673,12 @@ function processLocalCommand(
 • "Create a red rectangle" or "blue circle"
 • "Make 3 green triangles"
 • "Create a SWOT analysis"
+• "Create a flowchart" or "org chart"
+• "Create a kanban board"
+• "Create a mind map" or "timeline"
+• "Create a wireframe"
+• "Create a pros and cons" or "2x2 matrix"
+• "Create a bar chart"
 • "Create a sticky note saying 'Hello'"
 • "Create a 3x3 grid"
 • "Create a login form"
@@ -687,183 +688,3 @@ function processLocalCommand(
 • Multi-step: "Create a circle and then arrange in a grid"`;
 }
 
-function createSWOTAnalysis(
-  createObject: (type: ShapeType, props: CanvasObjectProps) => string,
-  center: { x: number; y: number }
-): string {
-  const qW = 220;
-  const qH = 180;
-  const gap = 4;
-  const baseX = center.x - qW - gap / 2;
-  const baseY = center.y - qH - gap / 2;
-
-  const quadrants: Array<{ label: string; fill: string; col: number; row: number }> = [
-    { label: 'Strengths',     fill: '#22C55E', col: 0, row: 0 },
-    { label: 'Weaknesses',    fill: '#EF4444', col: 1, row: 0 },
-    { label: 'Opportunities', fill: '#3B82F6', col: 0, row: 1 },
-    { label: 'Threats',       fill: '#F59E0B', col: 1, row: 1 },
-  ];
-
-  for (const q of quadrants) {
-    const left = baseX + q.col * (qW + gap);
-    const top = baseY + q.row * (qH + gap);
-
-    createObject('rect', {
-      left, top, width: qW, height: qH,
-      fill: q.fill, stroke: '#1E293B', strokeWidth: 2,
-    });
-
-    createObject('textbox', {
-      left: left + 10, top: top + 10, width: qW - 20, height: 30,
-      fill: '', text: q.label, fontSize: 18, fontFamily: 'sans-serif', textColor: '#FFFFFF',
-      stroke: 'transparent', strokeWidth: 0,
-    });
-  }
-
-  return 'Created SWOT analysis with 4 labeled quadrants (Strengths, Weaknesses, Opportunities, Threats)';
-}
-
-function createBarChartTemplate(
-  createObject: (type: ShapeType, props: CanvasObjectProps) => string,
-  center: { x: number; y: number }
-): string {
-  const chartW = 560;
-  const chartH = 360;
-  const marginLeft = 60;
-  const marginBottom = 70;
-  const marginTop = 40;
-  const plotW = chartW - marginLeft - 20;
-  const plotH = chartH - marginTop - marginBottom;
-
-  const originX = center.x - chartW / 2;
-  const originY = center.y - chartH / 2;
-  const plotLeft = originX + marginLeft;
-  const plotBottom = originY + chartH - marginBottom;
-  const plotTop = originY + marginTop;
-
-  const categories = ['Q1', 'Q2', 'Q3', 'Q4'];
-  const series = [
-    { label: '875',     color: '#4285F4' },
-    { label: 'Saw',     color: '#EA4335' },
-    { label: 'L440',    color: '#FBBC04' },
-    { label: 'Hammer',  color: '#34A853' },
-    { label: 'Grinder', color: '#4FC3F7' },
-    { label: 'Drill',   color: '#FF7043' },
-  ];
-
-  const sampleData = [
-    [250, 220, 200, 180, 160, 140],
-    [260, 300, 250, 340, 200, 180],
-    [240, 310, 280, 350, 220, 200],
-    [270, 280, 240, 300, 260, 220],
-  ];
-  const maxVal = 500;
-  const yTicks = [0, 100, 200, 300, 400, 500];
-
-  // Solid background with shadow-like border
-  createObject('rect', {
-    left: originX, top: originY, width: chartW, height: chartH,
-    fill: '#F8F9FA', stroke: '#BDBDBD', strokeWidth: 2,
-  });
-
-  // Title
-  createObject('textbox', {
-    left: originX + chartW / 2 - 80, top: originY + 8, width: 160, height: 24,
-    text: 'Acme Tool Sales', fontSize: 16, fontFamily: 'sans-serif',
-    textColor: '#333333', fill: '', stroke: 'transparent', strokeWidth: 0,
-  });
-
-  // Y-axis label
-  createObject('textbox', {
-    left: originX + 2, top: plotTop + plotH / 2 - 10, width: 50, height: 20,
-    text: 'Units Sold', fontSize: 10, fontFamily: 'sans-serif',
-    textColor: '#666666', fill: '', stroke: 'transparent', strokeWidth: 0,
-  });
-
-  // Y-axis ticks and gridlines
-  for (const tick of yTicks) {
-    const y = plotBottom - (tick / maxVal) * plotH;
-    // Gridline
-    createObject('line', {
-      left: plotLeft, top: y, width: plotW, height: 0,
-      fill: 'transparent', stroke: '#E8E8E8', strokeWidth: 1,
-    });
-    // Tick label
-    createObject('textbox', {
-      left: plotLeft - 32, top: y - 7, width: 28, height: 14,
-      text: String(tick), fontSize: 10, fontFamily: 'sans-serif',
-      textColor: '#888888', fill: '', stroke: 'transparent', strokeWidth: 0,
-    });
-  }
-
-  // X-axis line (bold)
-  createObject('rect', {
-    left: plotLeft, top: plotBottom, width: plotW, height: 2,
-    fill: '#424242', stroke: 'transparent', strokeWidth: 0,
-  });
-
-  // Y-axis line (bold)
-  createObject('rect', {
-    left: plotLeft, top: plotTop, width: 2, height: plotH,
-    fill: '#424242', stroke: 'transparent', strokeWidth: 0,
-  });
-
-  // Bars
-  const groupW = plotW / categories.length;
-  const barCount = series.length;
-  const barGap = 2;
-  const barW = Math.floor((groupW - 20) / barCount) - barGap;
-
-  for (let gi = 0; gi < categories.length; gi++) {
-    const groupLeft = plotLeft + gi * groupW + 10;
-
-    for (let si = 0; si < barCount; si++) {
-      const val = sampleData[gi][si];
-      const barH = (val / maxVal) * plotH;
-      const x = groupLeft + si * (barW + barGap);
-      const y = plotBottom - barH;
-
-      createObject('rect', {
-        left: x, top: y, width: barW, height: Math.round(barH),
-        fill: series[si].color, stroke: 'transparent', strokeWidth: 0,
-      });
-    }
-
-    // Category label (centered under group)
-    const labelW = groupW - 10;
-    createObject('textbox', {
-      left: groupLeft + (groupW - 20 - labelW) / 2, top: plotBottom + 6, width: labelW, height: 14,
-      text: categories[gi], fontSize: 10, fontFamily: 'sans-serif',
-      textColor: '#555555', fill: '', stroke: 'transparent', strokeWidth: 0,
-    });
-  }
-
-  // X-axis title
-  createObject('textbox', {
-    left: plotLeft + plotW / 2 - 35, top: plotBottom + 22, width: 70, height: 14,
-    text: 'Quarters', fontSize: 10, fontFamily: 'sans-serif',
-    textColor: '#555555', fill: '', stroke: 'transparent', strokeWidth: 0,
-  });
-
-  // Legend row
-  const legendY = originY + chartH - 18;
-  const swatchSize = 8;
-  const legendItemW = 70;
-  const legendTotalW = series.length * legendItemW;
-  const legendStartX = originX + (chartW - legendTotalW) / 2;
-
-  for (let i = 0; i < series.length; i++) {
-    const x = legendStartX + i * legendItemW;
-    createObject('rect', {
-      left: x, top: legendY, width: swatchSize, height: swatchSize,
-      fill: series[i].color, stroke: 'transparent', strokeWidth: 0,
-    });
-    createObject('textbox', {
-      left: x + swatchSize + 3, top: legendY - 2, width: legendItemW - swatchSize - 6, height: 12,
-      text: series[i].label, fontSize: 9, fontFamily: 'sans-serif',
-      textColor: '#666666', fill: '', stroke: 'transparent', strokeWidth: 0,
-    });
-  }
-
-  return 'Created bar chart template with 4 quarters, 6 product series, axes, and legend';
-}
