@@ -1150,10 +1150,10 @@ export function Canvas({
       return id ? [id] : [];
     };
 
-    const extractMovingPositions = (): Record<string, { left: number; top: number; angle?: number }> | null => {
+    const extractMovingPositions = (): Record<string, { left: number; top: number; angle?: number; scaleX?: number; scaleY?: number }> | null => {
       const activeObject = canvas.getActiveObject();
       if (!activeObject) return null;
-      const positions: Record<string, { left: number; top: number; angle?: number }> = {};
+      const positions: Record<string, { left: number; top: number; angle?: number; scaleX?: number; scaleY?: number }> = {};
       if (activeObject instanceof ActiveSelection) {
         const children = activeObject.getObjects();
         let count = 0;
@@ -1174,6 +1174,39 @@ export function Canvas({
       return Object.keys(positions).length > 0 ? positions : null;
     };
 
+    const extractScalingState = (): Record<string, { left: number; top: number; angle?: number; scaleX?: number; scaleY?: number }> | null => {
+      const activeObject = canvas.getActiveObject();
+      if (!activeObject) return null;
+      const positions: Record<string, { left: number; top: number; angle?: number; scaleX?: number; scaleY?: number }> = {};
+      if (activeObject instanceof ActiveSelection) {
+        const groupSx = activeObject.scaleX ?? 1;
+        const groupSy = activeObject.scaleY ?? 1;
+        const children = activeObject.getObjects();
+        let count = 0;
+        for (const child of children) {
+          if (count >= 30) break;
+          const id = (child as FabricObject & { id?: string }).id;
+          if (!id) continue;
+          const abs = getAbsolutePosition(child);
+          positions[id] = {
+            left: abs.left, top: abs.top, angle: abs.angle,
+            scaleX: (child.scaleX ?? 1) * groupSx,
+            scaleY: (child.scaleY ?? 1) * groupSy,
+          };
+          count++;
+        }
+      } else {
+        const id = (activeObject as FabricObject & { id?: string }).id;
+        if (id && activeObject.left !== undefined && activeObject.top !== undefined) {
+          positions[id] = {
+            left: activeObject.left, top: activeObject.top, angle: activeObject.angle,
+            scaleX: activeObject.scaleX, scaleY: activeObject.scaleY,
+          };
+        }
+      }
+      return Object.keys(positions).length > 0 ? positions : null;
+    };
+
     const handleObjectMoving = () => {
       const activeObject = canvas.getActiveObject();
       const ids = getActiveIds();
@@ -1186,7 +1219,7 @@ export function Canvas({
       const activeObject = canvas.getActiveObject();
       const ids = getActiveIds();
       if (ids.length > 0 && activeObject && activeObject.left !== undefined && activeObject.top !== undefined) {
-        onCursorMove(activeObject.left, activeObject.top, ids, true, null);
+        onCursorMove(activeObject.left, activeObject.top, ids, true, extractScalingState());
       }
     };
 
@@ -1891,6 +1924,8 @@ export function Canvas({
           if (!fabricObj) continue;
           const update: Record<string, number> = { left: pos.left, top: pos.top };
           if (pos.angle !== undefined) update.angle = pos.angle;
+          if (pos.scaleX !== undefined) update.scaleX = pos.scaleX;
+          if (pos.scaleY !== undefined) update.scaleY = pos.scaleY;
           fabricObj.set(update);
           fabricObj.setCoords();
           nowControlled.add(objId);
@@ -1937,7 +1972,13 @@ export function Canvas({
         if (existingFabric) {
           const positionPreserved = {
             ...obj,
-            props: { ...obj.props, left: existingFabric.left ?? obj.props.left, top: existingFabric.top ?? obj.props.top },
+            props: {
+              ...obj.props,
+              left: existingFabric.left ?? obj.props.left,
+              top: existingFabric.top ?? obj.props.top,
+              scaleX: existingFabric.scaleX ?? obj.props.scaleX,
+              scaleY: existingFabric.scaleY ?? obj.props.scaleY,
+            },
           };
           updateFabricObject(existingFabric, positionPreserved);
         }
