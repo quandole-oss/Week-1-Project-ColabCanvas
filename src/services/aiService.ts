@@ -423,15 +423,16 @@ export function executeAIAction(
       const isSticky = shapeType === 'sticky';
       const isTextbox = shapeType === 'textbox';
       const isTextElement = isSticky || isTextbox;
+      const isLine = shapeType === 'line';
       const props: CanvasObjectProps = {
         left: x,
         top: y,
         width: isTextElement ? (width ?? 200) : (width ?? 100),
-        height: isSticky ? (height ?? 200) : isTextbox ? (height ?? 40) : (height ?? 100),
+        height: isSticky ? (height ?? 200) : isTextbox ? (height ?? 40) : isLine ? (height ?? 0) : (height ?? 100),
         radius: radius ?? 50,
-        fill: isSticky ? (color ?? '#FEF3C7') : isTextbox ? '' : (color ?? '#3B82F6'),
+        fill: isSticky ? (color ?? '#FEF3C7') : isTextbox ? '' : isLine ? 'transparent' : (color ?? '#3B82F6'),
         stroke: isTextElement ? 'transparent' : (
-          stroke === 'none' || stroke === 'transparent' ? 'transparent' : (stroke ?? '#1E40AF')
+          stroke === 'none' || stroke === 'transparent' ? 'transparent' : (stroke ?? (isLine ? (color ?? '#1E40AF') : '#1E40AF'))
         ),
         strokeWidth: isTextElement ? 0 : (
           stroke === 'none' || stroke === 'transparent' ? 0 : (strokeWidth ?? 2)

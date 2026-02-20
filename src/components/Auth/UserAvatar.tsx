@@ -12,6 +12,8 @@ const sizeClasses = {
   lg: 'w-10 h-10 text-base',
 };
 
+const sizePx = { sm: 24, md: 32, lg: 40 };
+
 export function UserAvatar({
   name,
   color,
@@ -32,6 +34,8 @@ export function UserAvatar({
         <img
           src={photoURL}
           alt={name}
+          width={sizePx[size]}
+          height={sizePx[size]}
           className={`${sizeClasses[size]} rounded-full object-cover`}
         />
       ) : (

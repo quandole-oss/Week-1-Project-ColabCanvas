@@ -289,14 +289,16 @@ export function Room({ roomId }: RoomProps) {
   return (
     <div className="w-screen h-screen overflow-hidden bg-gradient-to-br from-blue-100 via-purple-50 to-pink-100 relative">
       {/* Connection status */}
-      {!isConnected && (
-        <div className="absolute top-0 left-0 right-0 bg-amber-400/90 backdrop-blur-sm text-amber-900 text-center py-1 text-sm z-50 font-medium">
-          Connecting to room...
-        </div>
-      )}
+      <div aria-live="polite">
+        {!isConnected && (
+          <div className="absolute top-0 left-0 right-0 bg-amber-400/90 backdrop-blur-sm text-amber-900 text-center py-1 text-sm z-50 font-medium">
+            Connecting to room{'\u2026'}
+          </div>
+        )}
+      </div>
 
       {/* Header bar */}
-      <div className="absolute top-0 left-0 right-0 h-12 bg-white/70 backdrop-blur-md border-b border-white/20 shadow-sm flex items-center justify-between px-4 z-40">
+      <header className="absolute top-0 left-0 right-0 h-12 bg-white/70 backdrop-blur-md border-b border-white/20 shadow-sm flex items-center justify-between px-4 z-40">
         <div className="flex items-center gap-3">
           <h1 className="text-gray-800 font-semibold">Collaborative Canvas</h1>
           <button
@@ -318,10 +320,10 @@ export function Room({ roomId }: RoomProps) {
             Sign Out
           </button>
         </div>
-      </div>
+      </header>
 
       {/* Canvas */}
-      <div className="pt-12 w-full h-full">
+      <main className="pt-12 w-full h-full">
         <Canvas
           roomId={roomId}
           userId={user.uid}
@@ -342,7 +344,7 @@ export function Room({ roomId }: RoomProps) {
           remoteCursors={remoteCursors}
           remoteObjects={objects}
         />
-      </div>
+      </main>
 
       {/* Online users */}
       <div className="absolute bottom-4 left-4 z-30">

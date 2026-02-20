@@ -35,6 +35,10 @@ const SYSTEM_PROMPT = `You are an AI architect for a collaborative design canvas
 
 Available shapes: rect, circle, line, triangle, hexagon, star, sticky, textbox.
 
+TEXT TYPES:
+- textbox: Clean text with transparent background. Use for labels, titles, annotations, descriptions, and any text in compositions (charts, diagrams, UI mockups).
+- sticky: Yellow post-it note with background color. ONLY use when the user explicitly asks for a "sticky note" or "post-it".
+
 CRITICAL COORDINATE SYSTEM:
 - x and y are the TOP-LEFT corner of the shape's bounding box, NOT the center.
 - For a circle with radius R at position (x, y): its visual center is at (x + R, y + R).
@@ -117,11 +121,13 @@ WORKED EXAMPLE — Dog:
   L back leg:  center = anchor + (-15, 128) = (385, 428). rect 14×30.    → x=378, y=413, color=#C4863C
   R back leg:  center = anchor + (15, 128) = (415, 428).  rect 14×30.    → x=408, y=413, color=#C4863C
 
+  CHECK: head-body OVERLAP? Head bottom=270+60=330, body top=370-50=320. Overlap=10px ✓ (NO GAP!)
   CHECK: ears DROOP from sides? Ear center y=310, head center y=270. Ears 40px BELOW center ✓
   CHECK: ears stick out from head? Ear extends to x=323, head edge x=340. Ears hang out ✓
   CHECK: eyes in upper half? eye y=258, head center y=270. Eyes above center ✓
   CHECK: 4 legs visible below body? Leg top y=401, body bottom y=420. Legs extend to y=436 ✓
   NOTE: FLOPPY ears = deltaY POSITIVE (below center). Bear ears = deltaY NEGATIVE (above center). Dogs MUST use positive deltaY for ears.
+  NOTE: Head and body circles MUST visually overlap — a gap between head and body looks broken.
 
 WORKED EXAMPLE — House:
   anchor = (400, 200)
@@ -168,12 +174,12 @@ Humanoid (person, robot, alien):
 Quadruped (dog, cat, horse):
   HEAD → circle at anchor + (0, -offset)
   BODY → circle at anchor + (0, +offset), similar size to head
-  EARS → Dog: circles BELOW head center (deltaY = +5 to +15), hanging off sides → floppy look
+  EARS → Dog: circles BELOW head center (deltaY = +50% to +70% of head radius), hanging off sides → floppy look
          Cat: triangles ABOVE head (deltaY negative) → pointed look
   LEGS → 4 rects below body bottom, at least 30px tall (REQUIRED — never omit)
   SNOUT → lighter circle on lower face (REQUIRED for dogs)
   MOUTH → small dark circle below snout
-  Rules: head overlaps body top by ~10%. DOG ears MUST have positive deltaY (droop down). Cat ears have negative deltaY (point up).
+  Rules: head and body MUST OVERLAP by at least 5-10px (no visible gap!). DOG ears MUST have positive deltaY (droop down). Cat ears have negative deltaY (point up).
 
 Building (house, tower):
   ROOF → at anchor + (0, -(bodyH/2 + roofH/2))
@@ -226,19 +232,21 @@ WORKED EXAMPLE — House with dog:
     Door:    rect 40×55       at (380, 315), color=#5C3317, stroke="none"
 
   DOG (secondary, right side, ~1/3 house height):
-    Head:    circle r=28 at (532, 310), color=#C4863C, stroke="none"
-    Body:    circle r=22 at (537, 368), color=#C4863C, stroke="none"
-    L ear:   circle r=10 at (528, 342), color=#8B5E2B, stroke="none"
-    R ear:   circle r=10 at (568, 342), color=#8B5E2B, stroke="none"
-    L eye:   circle r=3  at (548, 320), color=#000000, stroke="none"
-    R eye:   circle r=3  at (562, 320), color=#000000, stroke="none"
-    Snout:   circle r=10 at (553, 336), color=#DEB887, stroke="none"
-    Nose:    circle r=3  at (556, 332), color=#000000, stroke="none"
-    Tail:    triangle 12×18 at (576, 360), color=#C4863C, stroke="none"
-    L front leg: rect 8×22 at (530, 388), color=#C4863C, stroke="none"
-    R front leg: rect 8×22 at (546, 388), color=#C4863C, stroke="none"
-    L back leg:  rect 8×20 at (533, 405), color=#C4863C, stroke="none"
-    R back leg:  rect 8×20 at (549, 405), color=#C4863C, stroke="none"
+    Head:    circle r=28 at (532, 305), color=#C4863C, stroke="none"
+    Body:    circle r=22 at (537, 355), color=#C4863C, stroke="none"
+    L ear:   circle r=10 at (520, 338), color=#8B5E2B, stroke="none"
+    R ear:   circle r=10 at (576, 338), color=#8B5E2B, stroke="none"
+    L eye:   circle r=3  at (548, 318), color=#000000, stroke="none"
+    R eye:   circle r=3  at (562, 318), color=#000000, stroke="none"
+    Snout:   circle r=10 at (550, 332), color=#DEB887, stroke="none"
+    Nose:    circle r=3  at (556, 328), color=#000000, stroke="none"
+    Tail:    triangle 12×18 at (576, 355), color=#C4863C, stroke="none"
+    L front leg: rect 8×22 at (535, 395), color=#C4863C, stroke="none"
+    R front leg: rect 8×22 at (551, 395), color=#C4863C, stroke="none"
+    L back leg:  rect 8×20 at (538, 410), color=#C4863C, stroke="none"
+    R back leg:  rect 8×20 at (554, 410), color=#C4863C, stroke="none"
+    CHECK: head bottom (305+56=361) > body top (355)? Overlap=6px ✓
+    CHECK: ears hang off sides of head? L ear x=520 < head left=532, R ear x=586 > head right=588 ✓
 
 COLOR GUIDANCE:
 - Use appealing colors. Hex codes only.
@@ -296,7 +304,7 @@ const tools = [
         type: {
           type: "string",
           description:
-            "The type of shape: rect, circle, line, triangle, hexagon, star, or sticky",
+            "The type of shape: rect, circle, line, triangle, hexagon, star, sticky, or textbox. Use textbox for labels, titles, and annotations. Use sticky only when the user explicitly asks for a sticky/post-it note.",
         },
         x: { type: "number", description: "X position (left)" },
         y: { type: "number", description: "Y position (top)" },
@@ -311,7 +319,7 @@ const tools = [
         strokeWidth: { type: "number", description: "Stroke width in pixels (default 2, use 0 for no border)" },
         text: {
           type: "string",
-          description: "Text content (for sticky notes)",
+          description: "Text content (for textbox or sticky). Prefer textbox for labels/titles.",
         },
       },
       required: ["type", "x", "y"],
@@ -776,7 +784,7 @@ ${objectList || "(empty canvas)"}
             tools,
             messages: [{ role: "user", content: userMessage }],
             ...(isComplex
-              ? { thinking: { type: "enabled", budget_tokens: 3000 }, stream: true }
+              ? { thinking: { type: "enabled", budget_tokens: 5000 }, stream: true }
               : { tool_choice: { type: "any" }, temperature: 0.5 }),
           }),
           signal: controller.signal,

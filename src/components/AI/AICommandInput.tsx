@@ -42,6 +42,7 @@ export function AICommandInput({ onSubmit, isProcessing, messages, inputRef }: A
             onClick={() => setIsExpanded(false)}
             className="absolute top-1.5 right-1.5 w-5 h-5 bg-gray-200/80 hover:bg-gray-300/80 text-gray-500 hover:text-gray-700 rounded-full flex items-center justify-center text-xs z-10 transition"
             title="Minimize"
+            aria-label="Minimize chat"
           >
             ✕
           </button>
@@ -62,12 +63,14 @@ export function AICommandInput({ onSubmit, isProcessing, messages, inputRef }: A
                 <span className="whitespace-pre-wrap">{msg.content}</span>
               </div>
             ))}
-            {isProcessing && (
-              <div className="text-gray-500 text-xs flex items-center gap-1.5">
-                <span className="animate-pulse">●</span>
-                Thinking{elapsedSec >= 3 ? ` (${elapsedSec}s)` : '...'}
-              </div>
-            )}
+            <div aria-live="polite" className="text-gray-500 text-xs">
+              {isProcessing && (
+                <div className="flex items-center gap-1.5">
+                  <span className="animate-pulse motion-reduce:animate-none">●</span>
+                  Thinking{elapsedSec >= 3 ? ` (${elapsedSec}s)` : '\u2026'}
+                </div>
+              )}
+            </div>
             <div ref={messagesEndRef} />
           </div>
         </div>
@@ -88,8 +91,8 @@ export function AICommandInput({ onSubmit, isProcessing, messages, inputRef }: A
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask AI... (⌘K)"
-          className="flex-1 bg-transparent border-none outline-none text-gray-800 placeholder-gray-400 text-xs min-w-0"
+          placeholder={"Ask AI\u2026 (\u2318K)"}
+          className="flex-1 bg-transparent border-none text-gray-800 placeholder-gray-400 text-xs min-w-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-400 rounded"
           disabled={isProcessing}
         />
         <button
@@ -97,13 +100,14 @@ export function AICommandInput({ onSubmit, isProcessing, messages, inputRef }: A
           disabled={isProcessing || !input.trim()}
           className="px-2.5 py-1 bg-gradient-to-r from-purple-500 to-blue-500 hover:from-purple-600 hover:to-blue-600 disabled:from-gray-300 disabled:to-gray-300 disabled:cursor-not-allowed text-white text-xs rounded-md transition shadow-sm"
         >
-          {isProcessing ? '...' : 'Send'}
+          {isProcessing ? '\u2026' : 'Send'}
         </button>
         {messages.length > 0 && !isExpanded && (
           <button
             type="button"
             onClick={() => setIsExpanded(true)}
             className="px-1.5 py-1 text-gray-500 hover:text-gray-700 text-xs transition"
+            aria-label="Expand chat history"
           >
             ↑
           </button>

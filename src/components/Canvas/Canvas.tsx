@@ -1749,9 +1749,13 @@ export function Canvas({
 
           shape.set({ left: topLeftX, top: topLeftY, originX: 'left', originY: 'top' });
         } else if (shape instanceof Textbox) {
+          const tbLeft = shape.left ?? 0;
+          const tbTop = shape.top ?? 0;
+          const halfW = (shape.width ?? 0) / 2;
+          const halfH = (shape.height ?? 0) / 2;
           shape.set({
-            left: shape.left ?? 0,
-            top: shape.top ?? 0,
+            left: shape.originX === 'center' ? tbLeft - halfW : tbLeft,
+            top: shape.originY === 'center' ? tbTop - halfH : tbTop,
             originX: 'left',
             originY: 'top',
           });
@@ -1864,12 +1868,7 @@ export function Canvas({
             (o) => (o as FabricObject & { id?: string }).id === id
           );
           if (isInSelection) {
-            const angleChanged = obj.props.angle !== undefined && Math.abs((obj.props.angle ?? 0) - (existingLocal.angle ?? 0)) > 0.5;
-            const scaleChanged = (obj.props.scaleX !== undefined && Math.abs((obj.props.scaleX ?? 1) - (existingLocal.scaleX ?? 1)) > 0.01)
-              || (obj.props.scaleY !== undefined && Math.abs((obj.props.scaleY ?? 1) - (existingLocal.scaleY ?? 1)) > 0.01);
-            if (!angleChanged && !scaleChanged) {
-              return;
-            }
+            return;
           }
         }
         // Also skip if a Textbox is in editing mode (optimistic lock — secondary guard)
@@ -2461,15 +2460,21 @@ function createFabricObject(obj: CanvasObject): FabricObject | null {
           originY: 'top',
         }
       );
-    case 'line':
+    case 'line': {
+      const lx1 = props.x1 ?? props.left ?? 0;
+      const ly1 = props.y1 ?? props.top ?? 0;
+      const lx2 = props.x2 ?? ((props.left ?? 0) + (props.width ?? 100));
+      const ly2 = props.y2 ?? ((props.top ?? 0) + (props.height ?? 0));
       return new Line(
-        [props.x1 ?? props.left, props.y1 ?? props.top,
-         props.x2 ?? (props.left + 100), props.y2 ?? props.top],
+        [lx1, ly1, lx2, ly2],
         {
           stroke: strokeColor,
           strokeWidth: strokeWidth,
+          originX: 'left',
+          originY: 'top',
         }
       );
+    }
     case 'sticky': {
       const stickyTb = new Textbox(props.text ?? '', {
         left: props.left,

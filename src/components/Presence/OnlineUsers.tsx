@@ -46,7 +46,7 @@ export function OnlineUsers({ users, currentUserId, remoteCursors }: OnlineUsers
               <span
                 className={`w-2 h-2 rounded-full ml-auto shadow-sm ${
                   isEditing && user.userId !== currentUserId
-                    ? 'bg-amber-500 animate-pulse'
+                    ? 'bg-amber-500 animate-pulse motion-reduce:animate-none'
                     : 'bg-green-500'
                 }`}
               />
