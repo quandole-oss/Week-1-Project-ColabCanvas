@@ -157,12 +157,12 @@ Humanoid (person, robot, alien):
 Quadruped (dog, cat, horse):
   HEAD → circle at anchor + (0, -offset)
   BODY → circle at anchor + (0, +offset), similar size to head
-  EARS → Dog: circles BELOW head center (deltaY = +5 to +15), hanging off sides → floppy look
+  EARS → Dog: circles BELOW head center (deltaY = +50% to +70% of head radius), hanging off sides → floppy look
          Cat: triangles ABOVE head (deltaY negative) → pointed look
   LEGS → 4 rects below body bottom, at least 30px tall (REQUIRED — never omit)
   SNOUT → lighter circle on lower face (REQUIRED for dogs)
   MOUTH → small dark circle below snout
-  Rules: head overlaps body top by ~10%. DOG ears MUST have positive deltaY (droop down). Cat ears have negative deltaY (point up).
+  Rules: head and body MUST OVERLAP by at least 5-10px (no visible gap!). DOG ears MUST have positive deltaY (droop down). Cat ears have negative deltaY (point up).
 
 Building (house, tower):
   ROOF → at anchor + (0, -(bodyH/2 + roofH/2))
@@ -215,19 +215,21 @@ WORKED EXAMPLE — House with dog:
     Door:    rect 40×55       at (380, 315), color=#5C3317, stroke="none"
 
   DOG (secondary, right side, ~1/3 house height):
-    Head:    circle r=28 at (532, 310), color=#C4863C, stroke="none"
-    Body:    circle r=22 at (537, 368), color=#C4863C, stroke="none"
-    L ear:   circle r=10 at (528, 342), color=#8B5E2B, stroke="none"
-    R ear:   circle r=10 at (568, 342), color=#8B5E2B, stroke="none"
-    L eye:   circle r=3  at (548, 320), color=#000000, stroke="none"
-    R eye:   circle r=3  at (562, 320), color=#000000, stroke="none"
-    Snout:   circle r=10 at (553, 336), color=#DEB887, stroke="none"
-    Nose:    circle r=3  at (556, 332), color=#000000, stroke="none"
-    Tail:    triangle 12×18 at (576, 360), color=#C4863C, stroke="none"
-    L front leg: rect 8×22 at (530, 388), color=#C4863C, stroke="none"
-    R front leg: rect 8×22 at (546, 388), color=#C4863C, stroke="none"
-    L back leg:  rect 8×20 at (533, 405), color=#C4863C, stroke="none"
-    R back leg:  rect 8×20 at (549, 405), color=#C4863C, stroke="none"
+    Head:    circle r=28 at (532, 305), color=#C4863C, stroke="none"
+    Body:    circle r=22 at (537, 355), color=#C4863C, stroke="none"
+    L ear:   circle r=10 at (520, 338), color=#8B5E2B, stroke="none"
+    R ear:   circle r=10 at (576, 338), color=#8B5E2B, stroke="none"
+    L eye:   circle r=3  at (548, 318), color=#000000, stroke="none"
+    R eye:   circle r=3  at (562, 318), color=#000000, stroke="none"
+    Snout:   circle r=10 at (550, 332), color=#DEB887, stroke="none"
+    Nose:    circle r=3  at (556, 328), color=#000000, stroke="none"
+    Tail:    triangle 12×18 at (576, 355), color=#C4863C, stroke="none"
+    L front leg: rect 8×22 at (535, 395), color=#C4863C, stroke="none"
+    R front leg: rect 8×22 at (551, 395), color=#C4863C, stroke="none"
+    L back leg:  rect 8×20 at (538, 410), color=#C4863C, stroke="none"
+    R back leg:  rect 8×20 at (554, 410), color=#C4863C, stroke="none"
+    CHECK: head bottom (305+56=361) > body top (355)? Overlap=6px ✓
+    CHECK: ears hang off sides of head? L ear x=520 < head left=532, R ear x=586 > head right=588 ✓
 
 COLOR GUIDANCE:
 - Use appealing colors. Hex codes only.

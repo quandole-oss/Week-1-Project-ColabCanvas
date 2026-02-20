@@ -69,13 +69,15 @@ export function Home() {
 
         {/* Join room */}
         <form onSubmit={handleJoinRoom}>
+          <label htmlFor="room-id" className="sr-only">Room ID</label>
           <div className="flex gap-2">
             <input
+              id="room-id"
               type="text"
               value={roomId}
               onChange={(e) => setRoomId(e.target.value)}
-              placeholder="Enter room ID"
-              className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-blue-500"
+              placeholder={"Enter room ID\u2026"}
+              className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:border-transparent"
             />
             <button
               type="submit"

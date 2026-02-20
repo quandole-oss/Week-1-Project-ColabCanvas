@@ -1,4 +1,21 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, type ReactNode } from 'react';
+import {
+  MousePointer2,
+  Hand,
+  Square,
+  Circle,
+  Triangle,
+  Hexagon,
+  Star,
+  Minus,
+  StickyNote,
+  Type,
+  Eraser,
+  Undo2,
+  Redo2,
+  Plus,
+  ChevronDown,
+} from 'lucide-react';
 import type { Tool } from '../../types';
 
 interface CanvasToolbarProps {
@@ -22,22 +39,25 @@ interface CanvasToolbarProps {
   canRedo: boolean;
 }
 
-const basicTools: { id: Tool; icon: string; label: string }[] = [
-  { id: 'select', icon: '↖', label: 'Select' },
-  { id: 'pan', icon: '✋', label: 'Hand' },
+const ICON_SIZE = 16;
+const ICON_STROKE = 1.75;
+
+const basicTools: { id: Tool; icon: ReactNode; label: string }[] = [
+  { id: 'select', icon: <MousePointer2 size={ICON_SIZE} strokeWidth={ICON_STROKE} />, label: 'Select' },
+  { id: 'pan', icon: <Hand size={ICON_SIZE} strokeWidth={ICON_STROKE} />, label: 'Hand' },
 ];
 
-const shapes: { id: Tool; icon: string; label: string }[] = [
-  { id: 'rect', icon: '▢', label: 'Rectangle' },
-  { id: 'circle', icon: '○', label: 'Circle' },
-  { id: 'triangle', icon: '△', label: 'Triangle' },
-  { id: 'hexagon', icon: '⬡', label: 'Hexagon' },
-  { id: 'star', icon: '☆', label: 'Star' },
-  { id: 'line', icon: '╱', label: 'Line' },
+const shapes: { id: Tool; icon: ReactNode; label: string }[] = [
+  { id: 'rect', icon: <Square size={ICON_SIZE} strokeWidth={ICON_STROKE} />, label: 'Rectangle' },
+  { id: 'circle', icon: <Circle size={ICON_SIZE} strokeWidth={ICON_STROKE} />, label: 'Circle' },
+  { id: 'triangle', icon: <Triangle size={ICON_SIZE} strokeWidth={ICON_STROKE} />, label: 'Triangle' },
+  { id: 'hexagon', icon: <Hexagon size={ICON_SIZE} strokeWidth={ICON_STROKE} />, label: 'Hexagon' },
+  { id: 'star', icon: <Star size={ICON_SIZE} strokeWidth={ICON_STROKE} />, label: 'Star' },
+  { id: 'line', icon: <Minus size={ICON_SIZE} strokeWidth={ICON_STROKE} />, label: 'Line' },
 ];
 
-const otherTools: { id: Tool; icon: string; label: string }[] = [
-  { id: 'eraser', icon: '🧽', label: 'Eraser' },
+const otherTools: { id: Tool; icon: ReactNode; label: string }[] = [
+  { id: 'eraser', icon: <Eraser size={ICON_SIZE} strokeWidth={ICON_STROKE} />, label: 'Eraser' },
 ];
 
 const FONT_FAMILIES = [
@@ -91,7 +111,7 @@ export function CanvasToolbar({
 
   // Check if current tool is a shape
   const isShapeTool = shapes.some(s => s.id === tool);
-  const currentShapeIcon = shapes.find(s => s.id === selectedShape)?.icon || '▢';
+  const currentShapeIcon = shapes.find(s => s.id === selectedShape)?.icon || shapes[0].icon;
 
   const handleShapeSelect = (shapeId: Tool) => {
     setSelectedShape(shapeId);
@@ -111,12 +131,13 @@ export function CanvasToolbar({
           <button
             key={t.id}
             onClick={() => setTool(t.id)}
-            className={`w-8 h-8 rounded-md flex items-center justify-center text-base transition ${
+            className={`w-8 h-8 rounded-md flex items-center justify-center transition ${
               tool === t.id
                 ? 'bg-blue-500 text-white shadow-md'
                 : 'bg-white/50 text-gray-700 hover:bg-white/80'
             }`}
             title={t.label}
+            aria-label={t.label}
           >
             {t.icon}
           </button>
@@ -126,15 +147,17 @@ export function CanvasToolbar({
         <div className="relative" ref={dropdownRef}>
           <button
             onClick={() => setShapesOpen(!shapesOpen)}
-            className={`w-8 h-8 rounded-md flex items-center justify-center text-base transition relative ${
+            className={`w-8 h-8 rounded-md flex items-center justify-center transition relative ${
               isShapeTool
                 ? 'bg-blue-500 text-white shadow-md'
                 : 'bg-white/50 text-gray-700 hover:bg-white/80'
             }`}
             title="Shapes"
+            aria-label="Shapes"
+            aria-expanded={shapesOpen}
           >
             {currentShapeIcon}
-            <span className="absolute bottom-0.5 right-0.5 text-[8px] leading-none">▾</span>
+            <ChevronDown size={8} strokeWidth={2.5} className="absolute bottom-0.5 right-0.5" />
           </button>
 
           {/* Dropdown menu */}
@@ -150,7 +173,7 @@ export function CanvasToolbar({
                       : 'text-gray-700 hover:bg-gray-100'
                   }`}
                 >
-                  <span className="text-base">{shape.icon}</span>
+                  <span className="flex items-center justify-center w-5">{shape.icon}</span>
                   <span>{shape.label}</span>
                 </button>
               ))}
@@ -161,27 +184,29 @@ export function CanvasToolbar({
         {/* Sticky Note - standalone button */}
         <button
           onClick={() => setTool('sticky')}
-          className={`w-8 h-8 rounded-md flex items-center justify-center text-base transition ${
+          className={`w-8 h-8 rounded-md flex items-center justify-center transition ${
             tool === 'sticky'
               ? 'bg-blue-500 text-white shadow-md'
               : 'bg-white/50 text-gray-700 hover:bg-white/80'
           }`}
           title="Sticky Note"
+          aria-label="Sticky Note"
         >
-          🗒
+          <StickyNote size={ICON_SIZE} strokeWidth={ICON_STROKE} />
         </button>
 
         {/* Textbox - standalone button */}
         <button
           onClick={() => setTool('textbox')}
-          className={`w-8 h-8 rounded-md flex items-center justify-center text-base font-bold transition ${
+          className={`w-8 h-8 rounded-md flex items-center justify-center transition ${
             tool === 'textbox'
               ? 'bg-blue-500 text-white shadow-md'
               : 'bg-white/50 text-gray-700 hover:bg-white/80'
           }`}
           title="Text Box"
+          aria-label="Text Box"
         >
-          T
+          <Type size={ICON_SIZE} strokeWidth={ICON_STROKE} />
         </button>
 
         {/* Other tools */}
@@ -189,12 +214,13 @@ export function CanvasToolbar({
           <button
             key={t.id}
             onClick={() => setTool(t.id)}
-            className={`w-8 h-8 rounded-md flex items-center justify-center text-base transition ${
+            className={`w-8 h-8 rounded-md flex items-center justify-center transition ${
               tool === t.id
                 ? 'bg-blue-500 text-white shadow-md'
                 : 'bg-white/50 text-gray-700 hover:bg-white/80'
             }`}
             title={t.label}
+            aria-label={t.label}
           >
             {t.icon}
           </button>
@@ -252,26 +278,28 @@ export function CanvasToolbar({
         <button
           onClick={onUndo}
           disabled={!canUndo}
-          className={`w-8 h-8 rounded-md flex items-center justify-center text-base transition ${
+          className={`w-8 h-8 rounded-md flex items-center justify-center transition ${
             canUndo
               ? 'bg-white/50 text-gray-700 hover:bg-white/80'
               : 'bg-white/20 text-gray-400 cursor-not-allowed'
           }`}
           title="Undo (Ctrl+Z)"
+          aria-label="Undo"
         >
-          ↩
+          <Undo2 size={ICON_SIZE} strokeWidth={ICON_STROKE} />
         </button>
         <button
           onClick={onRedo}
           disabled={!canRedo}
-          className={`w-8 h-8 rounded-md flex items-center justify-center text-base transition ${
+          className={`w-8 h-8 rounded-md flex items-center justify-center transition ${
             canRedo
               ? 'bg-white/50 text-gray-700 hover:bg-white/80'
               : 'bg-white/20 text-gray-400 cursor-not-allowed'
           }`}
           title="Redo (Ctrl+Shift+Z)"
+          aria-label="Redo"
         >
-          ↪
+          <Redo2 size={ICON_SIZE} strokeWidth={ICON_STROKE} />
         </button>
       </div>
 
@@ -282,24 +310,27 @@ export function CanvasToolbar({
       <div className="bg-white/50 backdrop-blur-sm rounded-lg p-1 flex items-center gap-0.5 shadow-lg border border-white/20">
         <button
           onClick={onZoomOut}
-          className="w-8 h-8 rounded-md bg-white/50 text-gray-700 hover:bg-white/80 flex items-center justify-center text-base transition"
+          className="w-8 h-8 rounded-md bg-white/50 text-gray-700 hover:bg-white/80 flex items-center justify-center transition"
           title="Zoom Out"
+          aria-label="Zoom Out"
         >
-          −
+          <Minus size={14} strokeWidth={2} />
         </button>
         <button
           onClick={onResetZoom}
-          className="w-10 h-8 rounded-md bg-white/50 text-gray-700 hover:bg-white/80 flex items-center justify-center text-[11px] transition"
+          className="w-10 h-8 rounded-md bg-white/50 text-gray-700 hover:bg-white/80 flex items-center justify-center text-[11px] font-medium transition"
           title="Reset Zoom"
+          aria-label={`Reset zoom, currently ${zoomLevel}%`}
         >
           {zoomLevel}%
         </button>
         <button
           onClick={onZoomIn}
-          className="w-8 h-8 rounded-md bg-white/50 text-gray-700 hover:bg-white/80 flex items-center justify-center text-base transition"
+          className="w-8 h-8 rounded-md bg-white/50 text-gray-700 hover:bg-white/80 flex items-center justify-center transition"
           title="Zoom In"
+          aria-label="Zoom In"
         >
-          +
+          <Plus size={14} strokeWidth={2} />
         </button>
       </div>
 
