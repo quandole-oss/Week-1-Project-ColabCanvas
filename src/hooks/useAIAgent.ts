@@ -56,6 +56,7 @@ export function useAIAgent({
         let result: string;
 
         // Try local parser first for instant response on commands it can handle
+        const selectedIds = getSelectedObjectIds?.() ?? [];
         const localResult = tryLocalCommand(
           command,
           canvasObjects,
@@ -63,7 +64,8 @@ export function useAIAgent({
           updateObject,
           deleteObject,
           clearAllObjects,
-          getViewportCenter
+          getViewportCenter,
+          selectedIds
         );
 
         if (localResult !== null) {
@@ -305,6 +307,10 @@ function canHandleLocally(command: string): boolean {
   // Arrange / layout
   if (/arrange|align|line up/.test(lc) && !/and\s+(create|make|add|draw)/.test(lc)) return true;
 
+  // Rotate / resize (works on selected or recently created objects)
+  if (/\brotate\b/.test(lc)) return true;
+  if (/\bresize\b|\bscale\b/.test(lc)) return true;
+
   // Delete / clear
   if (/delete all|clear all|remove all|clear canvas|clear everything/.test(lc)) return true;
 
@@ -324,6 +330,14 @@ function canHandleLocally(command: string): boolean {
   return false;
 }
 
+// Shared context passed between multi-step sub-commands so later steps
+// can reference objects created by earlier steps.
+interface StepContext {
+  lastCreatedIds: string[];
+  pendingAngle?: number;
+  pendingScale?: number;
+}
+
 // Try local command — returns null if the command needs cloud AI
 function tryLocalCommand(
   command: string,
@@ -332,23 +346,41 @@ function tryLocalCommand(
   updateObject: (id: string, props: Partial<CanvasObjectProps>) => void,
   deleteObject: (id: string) => void,
   clearAllObjects?: () => number,
-  getViewportCenter?: () => { x: number; y: number }
+  getViewportCenter?: () => { x: number; y: number },
+  selectedIds?: string[]
 ): string | null {
-  // Multi-step: split on "and then" / "then" / semicolons
-  const steps = command.split(/\s*(?:;\s*|,?\s+and then\s+|,?\s+then\s+)/i).filter(Boolean);
+  // Multi-step: split on "and then", "then", semicolons, or "and" before an action verb
+  const ACTION_VERBS = '(?:create|make|add|draw|place|rotate|resize|scale|arrange|align|delete|clear|remove|move)';
+  const splitRe = new RegExp(
+    `\\s*(?:;\\s*|,?\\s+and then\\s+|,?\\s+then\\s+|\\s+and\\s+(?=${ACTION_VERBS}\\b))`,
+    'i'
+  );
+  const steps = command.split(splitRe).filter(Boolean);
   if (steps.length > 1) {
     const allLocal = steps.every(s => canHandleLocally(s));
     if (!allLocal) return null;
+    const ctx: StepContext = { lastCreatedIds: [] };
     const results: string[] = [];
     for (const step of steps) {
-      const r = processLocalCommand(step, canvasObjects, createObject, updateObject, deleteObject, clearAllObjects, getViewportCenter);
+      const r = processLocalCommand(step, canvasObjects, createObject, updateObject, deleteObject, clearAllObjects, getViewportCenter, ctx, selectedIds);
       results.push(r);
+    }
+    // Apply deferred transforms — updateObject can't work here because React
+    // state hasn't re-rendered. Instead, directly update each created object's
+    // props via updateObject which synchronously writes to objectsRef.
+    if (ctx.lastCreatedIds.length && (ctx.pendingAngle !== undefined || ctx.pendingScale !== undefined)) {
+      for (const id of ctx.lastCreatedIds) {
+        const updates: Partial<CanvasObjectProps> = {};
+        if (ctx.pendingAngle !== undefined) updates.angle = ctx.pendingAngle;
+        if (ctx.pendingScale !== undefined) { updates.scaleX = ctx.pendingScale; updates.scaleY = ctx.pendingScale; }
+        updateObject(id, updates);
+      }
     }
     return results.join('\n');
   }
 
   if (!canHandleLocally(command)) return null;
-  return processLocalCommand(command, canvasObjects, createObject, updateObject, deleteObject, clearAllObjects, getViewportCenter);
+  return processLocalCommand(command, canvasObjects, createObject, updateObject, deleteObject, clearAllObjects, getViewportCenter, undefined, selectedIds);
 }
 
 // Local command processing — handles templates & simple shapes instantly
@@ -359,12 +391,72 @@ function processLocalCommand(
   updateObject: (id: string, props: Partial<CanvasObjectProps>) => void,
   deleteObject: (id: string) => void,
   clearAllObjects?: () => number,
-  getViewportCenter?: () => { x: number; y: number }
+  getViewportCenter?: () => { x: number; y: number },
+  ctx?: StepContext,
+  selectedIds?: string[]
 ): string {
   const lowerCommand = command.toLowerCase();
   const results: string[] = [];
 
   const viewportCenter = getViewportCenter?.() || { x: 400, y: 300 };
+
+  // Rotate command
+  if (/\brotate\b/.test(lowerCommand)) {
+    const degMatch = lowerCommand.match(/rotate\s+(?:(?:them|it|those|the[ms]e?|the\s+select\w*)\s+)?(?:by\s+)?(\d+)\s*(?:deg|°|degrees?)?/i);
+    const degrees = degMatch ? parseInt(degMatch[1]) : 90;
+    const mentionsSelection = /\bselect\w*\b/i.test(lowerCommand);
+    const fromCtx = !!(ctx?.lastCreatedIds?.length);
+
+    // Priority: 1) context from previous step, 2) user's selection, 3) all objects
+    let targets: string[];
+    if (fromCtx) {
+      // Multi-step: don't call updateObject (React state not ready).
+      // Instead, stash the angle so shape creation can apply it at creation time.
+      ctx!.pendingAngle = degrees;
+      return `Rotated ${ctx!.lastCreatedIds.length} object${ctx!.lastCreatedIds.length === 1 ? '' : 's'} to ${degrees} degrees`;
+    } else if (mentionsSelection && selectedIds?.length) {
+      targets = selectedIds;
+    } else if (selectedIds?.length && !mentionsSelection) {
+      targets = Array.from(canvasObjects.keys());
+    } else {
+      targets = selectedIds?.length ? selectedIds : Array.from(canvasObjects.keys());
+    }
+
+    if (targets.length === 0) return 'No objects to rotate.';
+    let rotated = 0;
+    for (const id of targets) {
+      if (!canvasObjects.has(id)) continue;
+      updateObject(id, { angle: degrees });
+      rotated++;
+    }
+    return `Rotated ${rotated} object${rotated === 1 ? '' : 's'} to ${degrees} degrees`;
+  }
+
+  // Resize / scale command
+  if (/\bresize\b|\bscale\b/.test(lowerCommand)) {
+    const factorMatch = lowerCommand.match(/(?:resize|scale)\s+(?:(?:them|it|those|the[ms]e?|the\s+select\w*)\s+)?(?:by\s+)?(\d+(?:\.\d+)?)\s*x?\b/i);
+    const scale = factorMatch ? parseFloat(factorMatch[1]) : 2;
+    const mentionsSelection = /\bselect\w*\b/i.test(lowerCommand);
+
+    let targets: string[];
+    if (ctx?.lastCreatedIds?.length) {
+      ctx!.pendingScale = scale;
+      return `Scaled ${ctx!.lastCreatedIds.length} object${ctx!.lastCreatedIds.length === 1 ? '' : 's'} by ${scale}x`;
+    } else if (mentionsSelection && selectedIds?.length) {
+      targets = selectedIds;
+    } else {
+      targets = Array.from(canvasObjects.keys());
+    }
+
+    if (targets.length === 0) return 'No objects to resize.';
+    let resized = 0;
+    for (const id of targets) {
+      if (!canvasObjects.has(id)) continue;
+      updateObject(id, { scaleX: scale, scaleY: scale });
+      resized++;
+    }
+    return `Scaled ${resized} object${resized === 1 ? '' : 's'} by ${scale}x`;
+  }
 
   // SWOT analysis — 4 labeled quadrants
   if (/swot/i.test(lowerCommand)) {
@@ -548,6 +640,7 @@ function processLocalCommand(
         shapeType = 'rect';
       }
 
+      const createdIds: string[] = [];
       for (let i = 0; i < count; i++) {
         const offsetX = count > 1 ? i * (size.width + 20) : 0;
 
@@ -565,7 +658,10 @@ function processLocalCommand(
         };
         const result = executeAIAction(action, canvasObjects, createObject, updateObject, deleteObject);
         results.push(result.message);
+        if (result.createdIds) createdIds.push(...result.createdIds);
       }
+
+      if (ctx) ctx.lastCreatedIds = createdIds;
 
       if (results.length > 0) {
         return count > 1 ? `Created ${count} ${shapeType}s` : results[0];

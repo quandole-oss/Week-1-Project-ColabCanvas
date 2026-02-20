@@ -91,7 +91,7 @@ export function Room({ roomId }: RoomProps) {
     userColor: user.color,
   });
 
-  const { objects, isConnected, createObject, createObjects, updateObject, batchUpdateObjects, flushPendingUpdate, removeObject, clearAllObjects, setEditingObjectId, updateObjectZIndex, batchUpdateObjectZIndices, setActiveObjectIds, getActiveObjectIds } =
+  const { objects, isConnected, createObject, createObjects, updateObject, batchUpdateObjects, flushPendingUpdate, removeObject, clearAllObjects, setEditingObjectId, updateObjectZIndex, batchUpdateObjectZIndices, setActiveObjectIds, getActiveObjectIds, getObjectById } =
     useRealtimeSync({
       roomId,
       odId: user.uid,
@@ -156,17 +156,16 @@ export function Room({ roomId }: RoomProps) {
       });
       return id;
     },
-    [createObject, addHistoryEntry]
+    [createObject, addHistoryEntry, getObjectById]
   );
 
   const aiUpdateObject = useCallback(
     (id: string, props: Partial<CanvasObjectProps>) => {
-      const existingObj = objects.get(id);
+      const existingObj = getObjectById(id);
       if (existingObj) {
         const previousProps = { ...existingObj.props };
         const newProps = { ...existingObj.props, ...props };
         updateObject(id, newProps);
-        // Add to history for undo support
         addHistoryEntry({
           type: 'modify',
           objectId: id,
@@ -176,7 +175,7 @@ export function Room({ roomId }: RoomProps) {
         });
       }
     },
-    [objects, updateObject, addHistoryEntry]
+    [getObjectById, updateObject, addHistoryEntry]
   );
 
   const aiDeleteObject = useCallback(

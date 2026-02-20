@@ -38,6 +38,8 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
   const editingObjectIds = useRef<Set<string>>(new Set());
   // Track objects the local user is actively selecting/manipulating (LWW guard)
   const activeObjectIds = useRef<Set<string>>(new Set());
+  // Update intents that arrived before object creation committed.
+  const pendingUpdatesForMissing = useRef<Map<string, Partial<CanvasObjectProps>>>(new Map());
 
   // Keep objectsRef in sync with objects state
   useEffect(() => {
@@ -225,10 +227,14 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
     ) => {
       // Create local object immediately
       const now = Timestamp.now();
+      const pendingProps = pendingUpdatesForMissing.current.get(id);
+      if (pendingProps) {
+        pendingUpdatesForMissing.current.delete(id);
+      }
       const newObj: CanvasObject = {
         id,
         type,
-        props,
+        props: pendingProps ? { ...props, ...pendingProps } : props,
         zIndex,
         createdBy: odId,
         createdAt: now,
@@ -236,9 +242,13 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
         updatedAt: now,
       };
 
+      const immediateNext = new Map(objectsRef.current);
+      immediateNext.set(id, newObj);
+      objectsRef.current = immediateNext;
       setObjects((prev) => {
         const next = new Map(prev);
         next.set(id, newObj);
+        objectsRef.current = next;
         return next;
       });
 
@@ -279,6 +289,7 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
         for (const obj of created) {
           next.set(obj.id, obj);
         }
+        objectsRef.current = next;
         return next;
       });
 
@@ -313,7 +324,11 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
   const updateObject = useCallback(
     (id: string, props: CanvasObjectProps) => {
       const existingObj = objectsRef.current.get(id);
-      if (!existingObj) return;
+      if (!existingObj) {
+        const merged = { ...(pendingUpdatesForMissing.current.get(id) ?? {}), ...props };
+        pendingUpdatesForMissing.current.set(id, merged);
+        return;
+      }
 
       // Update local state immediately (no debounce) — keeps remoteObjects accurate
       setObjects((prev) => {
@@ -327,6 +342,7 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
             updatedAt: Timestamp.now(),
           });
         }
+        objectsRef.current = next;
         return next;
       });
 
@@ -588,6 +604,8 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
     }
   }, []);
 
+  const getObjectById = useCallback((id: string) => objectsRef.current.get(id), []);
+
   return {
     objects,
     isConnected,
@@ -603,5 +621,6 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
     batchUpdateObjectZIndices,
     setActiveObjectIds,
     getActiveObjectIds,
+    getObjectById,
   };
 }

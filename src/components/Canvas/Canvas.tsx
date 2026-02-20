@@ -1847,17 +1847,30 @@ export function Canvas({
       );
 
       if (existingLocal) {
-        // Skip if user is currently interacting with or editing this object
+        // Skip if user is currently interacting with or editing this object,
+        // UNLESS a programmatic transform (angle/scale) differs from the Fabric state.
         const activeObj = canvas.getActiveObject();
         if (activeObj && (activeObj as FabricObject & { id?: string }).id === id) {
-          return;
+          const angleChanged = obj.props.angle !== undefined && Math.abs((obj.props.angle ?? 0) - (existingLocal.angle ?? 0)) > 0.5;
+          const scaleChanged = (obj.props.scaleX !== undefined && Math.abs((obj.props.scaleX ?? 1) - (existingLocal.scaleX ?? 1)) > 0.01)
+            || (obj.props.scaleY !== undefined && Math.abs((obj.props.scaleY ?? 1) - (existingLocal.scaleY ?? 1)) > 0.01);
+          if (!angleChanged && !scaleChanged) {
+            return;
+          }
         }
         // Also skip objects inside an ActiveSelection (multi-select group)
         if (activeObj instanceof ActiveSelection) {
           const isInSelection = activeObj.getObjects().some(
             (o) => (o as FabricObject & { id?: string }).id === id
           );
-          if (isInSelection) return;
+          if (isInSelection) {
+            const angleChanged = obj.props.angle !== undefined && Math.abs((obj.props.angle ?? 0) - (existingLocal.angle ?? 0)) > 0.5;
+            const scaleChanged = (obj.props.scaleX !== undefined && Math.abs((obj.props.scaleX ?? 1) - (existingLocal.scaleX ?? 1)) > 0.01)
+              || (obj.props.scaleY !== undefined && Math.abs((obj.props.scaleY ?? 1) - (existingLocal.scaleY ?? 1)) > 0.01);
+            if (!angleChanged && !scaleChanged) {
+              return;
+            }
+          }
         }
         // Also skip if a Textbox is in editing mode (optimistic lock — secondary guard)
         if (existingLocal instanceof Textbox && (existingLocal as any).isEditing) {
