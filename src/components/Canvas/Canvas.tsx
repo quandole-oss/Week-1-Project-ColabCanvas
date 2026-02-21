@@ -193,6 +193,7 @@ export function Canvas({
     }
     // Clear redo history when new action is performed
     redoHistoryRef.current = [];
+    pendingDeletionRef.current.clear(); // Safe: redo stack just cleared, no pending undone-creates to protect
     setCanUndo(true);
     setCanRedo(false);
   }, []);
@@ -389,9 +390,10 @@ export function Canvas({
           );
           if (obj) {
             canvas.remove(obj);
-            remoteObjectsRef.current.delete(subEntry.objectId);
-            onObjectDeleted?.(subEntry.objectId);
           }
+          // Always clean up tracking and Firestore — even if Fabric object wasn't found
+          remoteObjectsRef.current.delete(subEntry.objectId);
+          onObjectDeleted?.(subEntry.objectId);
         } else if (subEntry.type === 'delete' && subEntry.props && subEntry.objectType) {
           pendingDeletionRef.current.delete(subEntry.objectId);
           const fabricObj = createFabricObject({
@@ -420,6 +422,8 @@ export function Canvas({
               angle: subEntry.previousProps.angle,
               scaleX: subEntry.previousProps.scaleX,
               scaleY: subEntry.previousProps.scaleY,
+              originX: 'left',
+              originY: 'top',
             });
             if (obj instanceof Rect || obj instanceof Triangle || obj instanceof Polygon) {
               obj.set({ width: subEntry.previousProps.width, height: subEntry.previousProps.height });
@@ -444,9 +448,10 @@ export function Canvas({
       );
       if (obj) {
         canvas.remove(obj);
-        remoteObjectsRef.current.delete(entry.objectId);
-        onObjectDeleted?.(entry.objectId);
       }
+      // Always clean up tracking and Firestore — even if Fabric object wasn't found
+      remoteObjectsRef.current.delete(entry.objectId);
+      onObjectDeleted?.(entry.objectId);
     } else if (entry.type === 'delete' && entry.props && entry.objectType) {
       // Undo delete = recreate the object
       // Clear pending deletion flag since we're re-creating
@@ -469,7 +474,8 @@ export function Canvas({
         (o) => (o as FabricObject & { id?: string }).id === entry.objectId
       );
       if (obj) {
-        // Restore previous properties
+        // Restore previous properties (originX/Y must be 'left'/'top' because
+        // getTopLeftPosition always stores top-left coordinates)
         obj.set({
           left: entry.previousProps.left,
           top: entry.previousProps.top,
@@ -479,6 +485,8 @@ export function Canvas({
           angle: entry.previousProps.angle,
           scaleX: entry.previousProps.scaleX,
           scaleY: entry.previousProps.scaleY,
+          originX: 'left',
+          originY: 'top',
         });
 
         if (obj instanceof Rect) {
@@ -579,6 +587,8 @@ export function Canvas({
               angle: subEntry.props.angle,
               scaleX: subEntry.props.scaleX,
               scaleY: subEntry.props.scaleY,
+              originX: 'left',
+              originY: 'top',
             });
             if (obj instanceof Rect || obj instanceof Triangle || obj instanceof Polygon) {
               obj.set({ width: subEntry.props.width, height: subEntry.props.height });
@@ -637,6 +647,8 @@ export function Canvas({
           angle: entry.props.angle,
           scaleX: entry.props.scaleX,
           scaleY: entry.props.scaleY,
+          originX: 'left',
+          originY: 'top',
         });
 
         if (obj instanceof Rect) {
@@ -1020,11 +1032,23 @@ export function Canvas({
             });
           }
           objectStateBeforeModifyRef.current.delete(id);
+          // Normalize origin to 'left'/'top' after modification to prevent drift.
+          // Scaling controls may change originX/Y; getTopLeftPosition already
+          // computed the correct top-left coords, so resetting is safe.
+          if (obj.originX !== 'left' || obj.originY !== 'top') {
+            obj.set({ left: currentProps.left, top: currentProps.top, originX: 'left', originY: 'top' });
+            obj.setCoords();
+          }
           // Sync to Firestore
           onObjectModified?.(id, currentProps);
         } else {
           // No previousProps (mouseDown not captured) — still sync
           const currentProps = getObjectProps(obj);
+          // Normalize origin
+          if (obj.originX !== 'left' || obj.originY !== 'top') {
+            obj.set({ left: currentProps.left, top: currentProps.top, originX: 'left', originY: 'top' });
+            obj.setCoords();
+          }
           onObjectModified?.(id, currentProps);
         }
       }
@@ -1134,6 +1158,9 @@ export function Canvas({
 
     const handleSelectionCleared = () => {
       // Broadcast that nothing is selected
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/258c0b6e-62fe-4ca4-b5c9-b5b43d02debf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Canvas.tsx:handleSelectionCleared',message:'Sending cursor (0,0) on selection clear',data:{willSendZeroZero:true},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+      // #endregion
       onCursorMove(0, 0, null, false);
     };
 
@@ -1231,9 +1258,21 @@ export function Canvas({
       }
     };
 
+    // Broadcast "moving" only when user actually presses down on an object (not on grid/background) so we don't trigger pan
+    const handlePointerDown = (opt: TPointerEventInfo<TPointerEvent>) => {
+      if (tool !== 'select') return;
+      if (!opt.target) return; // Clicked on canvas background, not an object
+      const activeObject = canvas.getActiveObject();
+      const ids = getActiveIds();
+      if (ids.length > 0 && activeObject && activeObject.left !== undefined && activeObject.top !== undefined) {
+        onCursorMove(activeObject.left, activeObject.top, ids, true, extractMovingPositions());
+      }
+    };
+
     canvas.on('selection:created', handleSelectionCreated);
     canvas.on('selection:updated', handleSelectionCreated);
     canvas.on('selection:cleared', handleSelectionCleared);
+    canvas.on('mouse:down', handlePointerDown);
     canvas.on('object:moving', handleObjectMoving);
     canvas.on('object:scaling', handleObjectScaling);
     canvas.on('object:rotating', handleObjectMoving);
@@ -1244,13 +1283,14 @@ export function Canvas({
       canvas.off('selection:created', handleSelectionCreated);
       canvas.off('selection:updated', handleSelectionCreated);
       canvas.off('selection:cleared', handleSelectionCleared);
+      canvas.off('mouse:down', handlePointerDown);
       canvas.off('object:moving', handleObjectMoving);
       canvas.off('object:scaling', handleObjectScaling);
       canvas.off('object:rotating', handleObjectMoving);
       canvas.off('object:modified', handleMotionEnd);
       canvas.off('mouse:up', handleMotionEnd);
     };
-  }, [fabricRef, onCursorMove]);
+  }, [fabricRef, onCursorMove, tool]);
 
   // Track whether a sticky note is selected and load its font properties
   useEffect(() => {
@@ -1922,7 +1962,13 @@ export function Canvas({
           if (pendingDeletionRef.current.has(objId)) continue;
           const fabricObj = remoteObjectsRef.current.get(objId);
           if (!fabricObj) continue;
-          const update: Record<string, number> = { left: pos.left, top: pos.top };
+          const left = typeof pos.left === 'number' && Number.isFinite(pos.left) ? pos.left : undefined;
+          const top = typeof pos.top === 'number' && Number.isFinite(pos.top) ? pos.top : undefined;
+          if (left === undefined || top === undefined) continue;
+          // #region agent log
+          if (pos.left === 0 && pos.top === 0) { fetch('http://127.0.0.1:7242/ingest/258c0b6e-62fe-4ca4-b5c9-b5b43d02debf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Canvas.tsx:rtdbMovingPositions',message:'Applying pos (0,0) to object',data:{objId},timestamp:Date.now(),hypothesisId:'H2'})}).catch(()=>{}); }
+          // #endregion
+          const update: Record<string, number> = { left, top };
           if (pos.angle !== undefined) update.angle = pos.angle;
           if (pos.scaleX !== undefined) update.scaleX = pos.scaleX;
           if (pos.scaleY !== undefined) update.scaleY = pos.scaleY;
@@ -1957,6 +2003,7 @@ export function Canvas({
 
   // Sync remote objects to canvas
   useEffect(() => {
+    const t0 = performance.now();
     const canvas = fabricRef.current;
     if (!canvas || !remoteObjects) return;
 
@@ -2052,12 +2099,9 @@ export function Canvas({
       }
     });
 
-    // Clear pending deletion flags for objects that are now gone from remote
-    pendingDeletionRef.current.forEach((id) => {
-      if (!remoteObjects.has(id)) {
-        pendingDeletionRef.current.delete(id);
-      }
-    });
+    // pendingDeletionRef entries are cleared when redo re-creates the object
+    // or when addToHistory resets the redo stack — not here, to avoid
+    // race conditions with in-flight Firestore deletes during multi-step undo.
 
     // Process pending AI auto-selection
     if (pendingSelectionIdsRef.current.length > 0) {
@@ -2083,6 +2127,8 @@ export function Canvas({
     }
 
     canvas.renderAll();
+    const dt = performance.now() - t0;
+    if (dt > 5) console.warn(`[Perf] Canvas sync: ${dt.toFixed(1)}ms, ${remoteObjects?.size ?? 0} objects`);
   }, [fabricRef, remoteObjects, setTool]);
 
   // Restack Fabric objects by zIndex — only when zIndex values actually change
@@ -2347,87 +2393,7 @@ export function Canvas({
       {/* Floating context menu for selected object */}
       {floatingMenu}
 
-      {/* Remote selection name badges - positioned above first selected object */}
-      {Array.from(remoteSelections.entries()).map(([odId, selection]) => {
-        const canvas = fabricRef.current;
-        if (!canvas) return null;
-
-        // Skip if all selected objects are also locally selected
-        const nonLocalIds = selection.objectIds.filter((id) => !localSelectedIds.has(id));
-        if (nonLocalIds.length === 0) return null;
-
-        // Position badge above the first object in the selection
-        const firstId = selection.objectIds[0];
-
-        const obj = remoteObjectsRef.current.get(firstId);
-
-        if (obj) {
-          const vpt = canvas.viewportTransform;
-          const zoom = canvas.getZoom();
-          if (!vpt) return null;
-
-          // Get bounding rect for accurate top position (accounts for rotation)
-          const bounds = obj.getBoundingRect();
-
-          // Transform canvas-space bounds to screen-space
-          const screenCenterX = bounds.left * zoom + vpt[4] + (bounds.width * zoom) / 2;
-          const screenTop = bounds.top * zoom + vpt[5];
-
-          return (
-            <div
-              key={odId}
-              className="absolute px-2 py-0.5 rounded-full text-[11px] text-white whitespace-nowrap pointer-events-none z-20 font-medium shadow-md"
-              style={{
-                backgroundColor: selection.color,
-                left: screenCenterX,
-                top: screenTop - 24,
-                transform: 'translateX(-50%)',
-              }}
-            >
-              {selection.userName}
-            </div>
-          );
-        }
-
-        // Fallback: use synced remoteObjects data if fabric object not found
-        const remoteObj = remoteObjects?.get(firstId);
-        if (remoteObj) {
-          const vpt = canvas.viewportTransform;
-          const zoom = canvas.getZoom();
-          if (!vpt) return null;
-
-          // Calculate width for centering the badge horizontally
-          let width: number;
-          if (remoteObj.type === 'circle') {
-            const radius = (remoteObj.props.radius || 50) * (remoteObj.props.scaleX || 1);
-            width = radius * 2;
-          } else {
-            width = (remoteObj.props.width || 100) * (remoteObj.props.scaleX || 1);
-          }
-
-          // Calculate center position in screen coordinates
-          const centerX = remoteObj.props.left + width / 2;
-          const screenCenterX = centerX * zoom + vpt[4];
-          const screenTop = remoteObj.props.top * zoom + vpt[5];
-
-          return (
-            <div
-              key={odId}
-              className="absolute px-2 py-0.5 rounded-full text-[11px] text-white whitespace-nowrap pointer-events-none z-20 font-medium shadow-md"
-              style={{
-                backgroundColor: selection.color,
-                left: screenCenterX,
-                top: screenTop - 24,
-                transform: 'translateX(-50%)',
-              }}
-            >
-              {selection.userName}
-            </div>
-          );
-        }
-
-        return null;
-      })}
+      {/* When a remote user interacts with an object, only the colored outline is shown (no name badge) */}
 
       <CanvasToolbar
         tool={tool}

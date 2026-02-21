@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { isFirebaseConfigured } from '../services/firebase';
+import { isFirebaseConfigured, db } from '../services/firebase';
+import { Timestamp, writeBatch, doc } from 'firebase/firestore';
 import {
   syncObject,
   syncObjectPartial,
@@ -11,7 +12,6 @@ import {
   ensureRoom,
 } from '../services/canvasSync';
 import type { CanvasObject, CanvasObjectProps, ShapeType } from '../types';
-import { Timestamp } from 'firebase/firestore';
 
 interface UseRealtimeSyncOptions {
   roomId: string;
@@ -40,6 +40,18 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
   const activeObjectIds = useRef<Set<string>>(new Set());
   // Update intents that arrived before object creation committed.
   const pendingUpdatesForMissing = useRef<Map<string, Partial<CanvasObjectProps>>>(new Map());
+
+  // [Perf] Track setObjects call frequency
+  const setObjectsCallCount = useRef(0);
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (setObjectsCallCount.current > 0) {
+        console.warn(`[Perf] setObjects called ${setObjectsCallCount.current}x in last second, map size: ${objectsRef.current.size}`);
+        setObjectsCallCount.current = 0;
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // Keep objectsRef in sync with objects state
   useEffect(() => {
@@ -147,58 +159,61 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
       try {
         setIsConnected(true);
 
-        // Subscribe to object changes (always try, even if ensureRoom had issues)
+        // Subscribe to object changes (batched — single setObjects per snapshot)
         unsubscribe = subscribeToObjects(
           roomId,
-          // On add
-          (obj) => {
+          ({ added, modified, removed }) => {
+            setObjectsCallCount.current++;
             setObjects((prev) => {
-              if (prev.has(obj.id)) return prev; // Skip own echo
               const next = new Map(prev);
-              next.set(obj.id, obj);
-              return next;
-            });
-          },
-          // On modify
-          (obj) => {
-            // Skip if this is our own pending update echoing back (refcount)
-            const pending = localPendingUpdates.current.get(obj.id) ?? 0;
-            if (pending > 0) {
-              const next = pending - 1;
-              if (next === 0) {
-                localPendingUpdates.current.delete(obj.id);
-              } else {
-                localPendingUpdates.current.set(obj.id, next);
-              }
-              return;
-            }
-            // Skip if user is currently editing this object (optimistic lock)
-            if (editingObjectIds.current.has(obj.id)) return;
-            // Skip if user is actively selecting/manipulating this object (LWW guard)
-            // BUT still accept zIndex changes so layer reordering syncs across tabs
-            if (activeObjectIds.current.has(obj.id)) {
-              setObjects((prev) => {
-                const existing = prev.get(obj.id);
-                if (!existing || existing.zIndex === obj.zIndex) return prev;
-                const next = new Map(prev);
-                next.set(obj.id, { ...existing, zIndex: obj.zIndex });
-                return next;
-              });
-              return;
-            }
+              let changed = false;
 
-            setObjects((prev) => {
-              const next = new Map(prev);
-              next.set(obj.id, obj);
-              return next;
-            });
-          },
-          // On remove
-          (objectId) => {
-            setObjects((prev) => {
-              const next = new Map(prev);
-              next.delete(objectId);
-              return next;
+              // Handle added objects
+              for (const obj of added) {
+                if (!next.has(obj.id)) {
+                  next.set(obj.id, obj);
+                  changed = true;
+                }
+              }
+
+              // Handle modified objects (with echo/editing/active guards)
+              for (const obj of modified) {
+                // Skip if this is our own pending update echoing back (refcount)
+                const pending = localPendingUpdates.current.get(obj.id) ?? 0;
+                if (pending > 0) {
+                  const remainingPending = pending - 1;
+                  if (remainingPending === 0) {
+                    localPendingUpdates.current.delete(obj.id);
+                  } else {
+                    localPendingUpdates.current.set(obj.id, remainingPending);
+                  }
+                  continue;
+                }
+                // Skip if user is currently editing this object (optimistic lock)
+                if (editingObjectIds.current.has(obj.id)) continue;
+                // Skip if user is actively selecting/manipulating this object (LWW guard)
+                // BUT still accept zIndex changes so layer reordering syncs across tabs
+                if (activeObjectIds.current.has(obj.id)) {
+                  const existing = next.get(obj.id);
+                  if (existing && existing.zIndex !== obj.zIndex) {
+                    next.set(obj.id, { ...existing, zIndex: obj.zIndex });
+                    changed = true;
+                  }
+                  continue;
+                }
+                next.set(obj.id, obj);
+                changed = true;
+              }
+
+              // Handle removed objects
+              for (const id of removed) {
+                if (next.has(id)) {
+                  next.delete(id);
+                  changed = true;
+                }
+              }
+
+              return changed ? next : prev;
             });
           }
         );
@@ -293,17 +308,28 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
         return next;
       });
 
-      // Sync
-      if (isFirebaseConfigured) {
+      // Sync — use writeBatch for Firestore to reduce N writes to 1
+      if (isFirebaseConfigured && db) {
+        const batch = writeBatch(db);
         for (const obj of created) {
           localPendingUpdates.current.set(obj.id, (localPendingUpdates.current.get(obj.id) ?? 0) + 1);
+          const objectRef = doc(db, 'rooms', roomId, 'objects', obj.id);
+          // Strip undefined values — Firestore rejects them
+          const cleanProps = Object.fromEntries(
+            Object.entries(obj.props).filter(([, v]) => v !== undefined)
+          ) as CanvasObjectProps;
+          batch.set(objectRef, {
+            id: obj.id,
+            type: obj.type,
+            props: cleanProps,
+            zIndex: obj.zIndex,
+            createdBy: obj.createdBy,
+            createdAt: obj.createdAt,
+            updatedBy: obj.updatedBy,
+            updatedAt: obj.updatedAt,
+          });
         }
-        await Promise.all(
-          created.map((obj) =>
-            syncObject(roomId, obj.id, obj.type, obj.props, obj.zIndex, odId, true)
-              .catch((err) => console.error('Failed to sync object:', err))
-          )
-        );
+        await batch.commit().catch((err) => console.error('Failed to batch-create objects:', err));
       } else if (broadcastChannel.current) {
         for (const obj of created) {
           broadcastChannel.current.postMessage({ type: 'create', object: obj } as SyncMessage);
@@ -459,31 +485,27 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
     [roomId]
   );
 
-  // Clear all objects
+  // Clear all objects (single state update + batched Firestore delete)
   const clearAllObjects = useCallback(() => {
-    // Use objectsRef to get the current state (avoids stale closure issues)
     const objectIds = Array.from(objectsRef.current.keys());
+    if (objectIds.length === 0) return 0;
     const count = objectIds.length;
 
-    // Delete each object
-    objectIds.forEach(id => {
-      // Remove from local state immediately
-      setObjects((prev) => {
-        const next = new Map(prev);
-        next.delete(id);
-        return next;
-      });
+    // Single state update
+    setObjects(new Map());
 
-      // Sync deletion
-      if (isFirebaseConfigured) {
-        deleteObject(roomId, id).catch(err => console.error('Failed to delete:', err));
-      } else if (broadcastChannel.current) {
-        broadcastChannel.current.postMessage({
-          type: 'delete',
-          id,
-        } as SyncMessage);
+    // Batch Firestore delete
+    if (isFirebaseConfigured && db) {
+      const batch = writeBatch(db);
+      for (const id of objectIds) {
+        batch.delete(doc(db, 'rooms', roomId, 'objects', id));
       }
-    });
+      batch.commit().catch(err => console.error('Failed to batch-delete:', err));
+    } else if (broadcastChannel.current) {
+      for (const id of objectIds) {
+        broadcastChannel.current.postMessage({ type: 'delete', id } as SyncMessage);
+      }
+    }
 
     return count;
   }, [roomId]);

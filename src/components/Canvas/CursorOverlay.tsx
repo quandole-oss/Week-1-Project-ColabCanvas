@@ -12,10 +12,13 @@ interface ScreenPosition {
   y: number;
 }
 
+// Lerp factor per frame: higher = snappier, lower = smoother (0.2 ≈ smooth at 60fps)
+const CURSOR_LERP = 0.22;
+
 export function CursorOverlay({ cursors, canvasRef }: CursorOverlayProps) {
   const animationFrameRef = useRef<number | undefined>(undefined);
   const cursorElementsRef = useRef<Map<string, HTMLDivElement>>(new Map());
-  const lastPositionsRef = useRef<Map<string, ScreenPosition>>(new Map());
+  const smoothPositionsRef = useRef<Map<string, ScreenPosition>>(new Map());
   const cursorsRef = useRef<Map<string, CursorState>>(cursors);
 
   // Keep cursorsRef in sync without triggering rAF restart
@@ -23,7 +26,7 @@ export function CursorOverlay({ cursors, canvasRef }: CursorOverlayProps) {
     cursorsRef.current = cursors;
   }, [cursors]);
 
-  // rAF loop: direct DOM manipulation, no React state
+  // rAF loop: lerp display position toward target for smooth movement
   useEffect(() => {
     const updatePositions = () => {
       const canvas = canvasRef.current;
@@ -41,12 +44,18 @@ export function CursorOverlay({ cursors, canvasRef }: CursorOverlayProps) {
       cursorsRef.current.forEach((cursor, odId) => {
         const el = cursorElementsRef.current.get(odId);
         if (!el) return;
-        const screenX = cursor.x * zoom + vpt[4];
-        const screenY = cursor.y * zoom + vpt[5];
-        const last = lastPositionsRef.current.get(odId);
-        if (last && Math.abs(last.x - screenX) < 0.5 && Math.abs(last.y - screenY) < 0.5) return;
-        lastPositionsRef.current.set(odId, { x: screenX, y: screenY });
-        el.style.transform = `translate(${screenX}px, ${screenY}px)`;
+        if (typeof cursor.x !== 'number' || typeof cursor.y !== 'number') return;
+        const targetX = cursor.x * zoom + vpt[4];
+        const targetY = cursor.y * zoom + vpt[5];
+
+        let smooth = smoothPositionsRef.current.get(odId);
+        if (!smooth) {
+          smooth = { x: targetX, y: targetY };
+          smoothPositionsRef.current.set(odId, smooth);
+        }
+        smooth.x += (targetX - smooth.x) * CURSOR_LERP;
+        smooth.y += (targetY - smooth.y) * CURSOR_LERP;
+        el.style.transform = `translate(${smooth.x}px, ${smooth.y}px)`;
       });
 
       animationFrameRef.current = requestAnimationFrame(updatePositions);
@@ -63,9 +72,9 @@ export function CursorOverlay({ cursors, canvasRef }: CursorOverlayProps) {
 
   // Clean up stale entries when cursors leave
   useEffect(() => {
-    lastPositionsRef.current.forEach((_, id) => {
+    smoothPositionsRef.current.forEach((_, id) => {
       if (!cursors.has(id)) {
-        lastPositionsRef.current.delete(id);
+        smoothPositionsRef.current.delete(id);
         cursorElementsRef.current.delete(id);
       }
     });
@@ -76,13 +85,21 @@ export function CursorOverlay({ cursors, canvasRef }: CursorOverlayProps) {
       cursorElementsRef.current.set(odId, el);
     } else {
       cursorElementsRef.current.delete(odId);
-      lastPositionsRef.current.delete(odId);
+      smoothPositionsRef.current.delete(odId);
     }
   }, []);
 
+  // Only show cursor when user is NOT interacting with an object (no selection, not moving, not dragging)
+  const cursorsToShow = Array.from(cursors.entries()).filter(([, cursor]) => {
+    const hasSelection = cursor.selectedObjectIds && cursor.selectedObjectIds.length > 0;
+    const isMoving = cursor.isMoving === true;
+    const isDragging = cursor.movingObjectPositions != null && Object.keys(cursor.movingObjectPositions).length > 0;
+    return !hasSelection && !isMoving && !isDragging;
+  });
+
   return (
     <div className="absolute inset-0 pointer-events-none overflow-hidden z-10">
-      {Array.from(cursors.entries()).map(([odId, cursor]) => (
+      {cursorsToShow.map(([odId, cursor]) => (
         <div
           key={odId}
           ref={setElementRef(odId)}

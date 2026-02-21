@@ -41,9 +41,15 @@ export function useCursorSync({
           if (msg.cursor.userId !== odId) {
             setRemoteCursors((prev) => {
               const next = new Map(prev);
-              // Only include if active recently (10 seconds for background tab tolerance)
               if (Date.now() - msg.cursor.lastActive < 10000) {
-                next.set(msg.cursor.userId, msg.cursor);
+                const c = msg.cursor;
+                let x = c.x, y = c.y;
+                if (x === 0 && y === 0 && next.has(c.userId)) {
+                  const old = next.get(c.userId)!;
+                  x = old.x;
+                  y = old.y;
+                }
+                next.set(c.userId, { ...c, x, y });
               }
               return next;
             });
@@ -107,7 +113,22 @@ export function useCursorSync({
 
     try {
       const unsubscribe = subscribeToCursors(roomId, odId, (cursors) => {
-        setRemoteCursors(cursors);
+        // #region agent log
+        cursors.forEach((c, id) => { if (c.x === 0 && c.y === 0) { fetch('http://127.0.0.1:7242/ingest/258c0b6e-62fe-4ca4-b5c9-b5b43d02debf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useCursorSync.ts:subscribeToCursors',message:'Received remote cursor at (0,0)',data:{userId:id,isMoving:c.isMoving},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{}); } });
+        // #endregion
+        setRemoteCursors((prev) => {
+          const next = new Map<string, CursorState>();
+          cursors.forEach((c, id) => {
+            let x = c.x, y = c.y;
+            if (x === 0 && y === 0 && prev.has(id)) {
+              const old = prev.get(id)!;
+              x = old.x;
+              y = old.y;
+            }
+            next.set(id, { ...c, x, y });
+          });
+          return next;
+        });
       });
 
       return () => {
@@ -126,9 +147,16 @@ export function useCursorSync({
 
   // Send cursor state update
   const sendCursorUpdate = useCallback(() => {
+    const x = lastPositionRef.current.x;
+    const y = lastPositionRef.current.y;
+    // Never broadcast (0,0) — causes remote cursor to snap to top-left (selection clear + heartbeat both hit this)
+    if (x === 0 && y === 0) return;
+    // #region agent log
+    if (x === 0 && y === 0) { fetch('http://127.0.0.1:7242/ingest/258c0b6e-62fe-4ca4-b5c9-b5b43d02debf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useCursorSync.ts:sendCursorUpdate',message:'Broadcasting cursor at (0,0)',data:{x,y,isMoving:isMovingRef.current},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{}); }
+    // #endregion
     const cursorState: CursorState = {
-      x: lastPositionRef.current.x,
-      y: lastPositionRef.current.y,
+      x,
+      y,
       userId: odId,
       userName,
       color: userColor,
@@ -171,7 +199,12 @@ export function useCursorSync({
   // Broadcast cursor - selection/motion changes are immediate, position is throttled
   const broadcastCursor = useCallback(
     (x: number, y: number, selectedObjectIds?: string[] | null, isMoving?: boolean, movingObjectPositions?: Record<string, { left: number; top: number; angle?: number }> | null) => {
-      lastPositionRef.current = { x, y };
+      // When Canvas clears selection it sends (0,0); don't overwrite last position so we keep
+      // broadcasting the real cursor location and avoid remote cursor snapping to top-left
+      const selectionClearOnly = x === 0 && y === 0 && selectedObjectIds === null && isMoving === false;
+      if (!selectionClearOnly) {
+        lastPositionRef.current = { x, y };
+      }
 
       const selectionChanged = selectedObjectIds !== undefined &&
         JSON.stringify(selectedObjectIds) !== JSON.stringify(currentSelectionRef.current);
@@ -195,7 +228,12 @@ export function useCursorSync({
       if (isMoving && movingObjectPositions) {
         sendCursorUpdate();
       } else if (selectionChanged || motionChanged) {
-        sendCursorUpdate();
+        // Never broadcast (0,0) when only clearing selection — observer would snap cursor to origin
+        if (selectionClearOnly && lastPositionRef.current.x === 0 && lastPositionRef.current.y === 0) {
+          // Skip send; observers keep previous cursor position
+        } else {
+          sendCursorUpdate();
+        }
       } else {
         throttledPositionUpdate(x, y);
       }

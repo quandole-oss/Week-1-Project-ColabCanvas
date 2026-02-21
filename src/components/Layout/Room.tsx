@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Profiler, useCallback, useEffect, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { Canvas } from '../Canvas';
 import type { HistoryEntry } from '../Canvas';
@@ -324,6 +324,9 @@ export function Room({ roomId }: RoomProps) {
 
       {/* Canvas */}
       <main className="pt-12 w-full h-full">
+        <Profiler id="Canvas" onRender={(_id, phase, actualDuration) => {
+          if (actualDuration > 16) console.warn(`[Perf] Canvas render: ${actualDuration.toFixed(1)}ms (${phase})`);
+        }}>
         <Canvas
           roomId={roomId}
           userId={user.uid}
@@ -344,6 +347,7 @@ export function Room({ roomId }: RoomProps) {
           remoteCursors={remoteCursors}
           remoteObjects={objects}
         />
+        </Profiler>
       </main>
 
       {/* Online users */}

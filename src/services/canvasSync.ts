@@ -176,28 +176,29 @@ export async function deleteObject(
   await deleteDoc(objectRef);
 }
 
-// Subscribe to canvas objects changes
+// Subscribe to canvas objects changes (batched — all changes in a single callback)
 export function subscribeToObjects(
   roomId: string,
-  onAdd: (obj: CanvasObject) => void,
-  onModify: (obj: CanvasObject) => void,
-  onRemove: (objectId: string) => void
+  onChanges: (changes: { added: CanvasObject[]; modified: CanvasObject[]; removed: string[] }) => void
 ): Unsubscribe {
   const objectsRef = getObjectsRef(roomId);
   const q = query(objectsRef, orderBy('zIndex', 'asc'));
 
   return onSnapshot(q, (snapshot) => {
-    snapshot.docChanges().forEach((change) => {
+    const changes = snapshot.docChanges();
+    if (changes.length > 2) {
+      console.warn(`[Perf] Firestore snapshot: ${changes.length} changes`);
+    }
+    const added: CanvasObject[] = [];
+    const modified: CanvasObject[] = [];
+    const removed: string[] = [];
+    changes.forEach((change) => {
       const data = change.doc.data() as CanvasObject;
-
-      if (change.type === 'added') {
-        onAdd(data);
-      } else if (change.type === 'modified') {
-        onModify(data);
-      } else if (change.type === 'removed') {
-        onRemove(change.doc.id);
-      }
+      if (change.type === 'added') added.push(data);
+      else if (change.type === 'modified') modified.push(data);
+      else if (change.type === 'removed') removed.push(change.doc.id);
     });
+    onChanges({ added, modified, removed });
   }, (error) => {
     console.error('Firestore subscription error:', error);
   });
