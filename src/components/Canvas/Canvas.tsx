@@ -48,6 +48,7 @@ interface CanvasProps {
   isFilterActive?: boolean;
   activeFilter?: string | null;
   groupedPositions?: Map<string, { left: number; top: number }>;
+  clusterBadges?: Array<{ left: number; top: number; classification: string }>;
 }
 
 export function Canvas({
@@ -73,6 +74,7 @@ export function Canvas({
   isFilterActive = false,
   activeFilter = null,
   groupedPositions,
+  clusterBadges,
 }: CanvasProps) {
   const canvasElRef = useRef<HTMLCanvasElement>(null);
   const objectCountRef = useRef(0);
@@ -114,6 +116,9 @@ export function Canvas({
   const filterPositionSnapshotRef = useRef<Map<string, { left: number; top: number }> | null>(null);
   // Track previous isFilterActive to detect transitions
   const prevFilterActiveRef = useRef(false);
+  // Mirror isFilterActive into a ref so event-handler closures can access current state
+  const isFilterActiveRef = useRef(false);
+  isFilterActiveRef.current = isFilterActive;
 
   const {
     fabricRef,
@@ -995,6 +1000,14 @@ export function Canvas({
             const previousProps = objectStateBeforeModifyRef.current.get(childId);
             if (previousProps) {
               const currentProps = postProcess(child, getObjectProps(child));
+              // Prevent filter-view positions from leaking to Firestore
+              if (isFilterActiveRef.current && filterPositionSnapshotRef.current) {
+                const original = filterPositionSnapshotRef.current.get(childId);
+                if (original) {
+                  currentProps.left = original.left;
+                  currentProps.top = original.top;
+                }
+              }
               if (JSON.stringify(previousProps) !== JSON.stringify(currentProps)) {
                 batchEntries.push({
                   type: 'modify',
@@ -1008,6 +1021,14 @@ export function Canvas({
             } else {
               // Fallback: no previousProps captured — still sync current state
               const currentProps = postProcess(child, getObjectProps(child));
+              // Prevent filter-view positions from leaking to Firestore
+              if (isFilterActiveRef.current && filterPositionSnapshotRef.current) {
+                const original = filterPositionSnapshotRef.current.get(childId);
+                if (original) {
+                  currentProps.left = original.left;
+                  currentProps.top = original.top;
+                }
+              }
               fallbackSyncEntries.push({ id: childId, props: currentProps });
             }
           }
@@ -1038,6 +1059,14 @@ export function Canvas({
         const previousProps = objectStateBeforeModifyRef.current.get(id);
         if (previousProps) {
           const currentProps = getObjectProps(obj);
+          // Prevent filter-view positions from leaking to Firestore
+          if (isFilterActiveRef.current && filterPositionSnapshotRef.current) {
+            const original = filterPositionSnapshotRef.current.get(id);
+            if (original) {
+              currentProps.left = original.left;
+              currentProps.top = original.top;
+            }
+          }
           // Only add to history if something actually changed
           if (JSON.stringify(previousProps) !== JSON.stringify(currentProps)) {
             addToHistory({
@@ -1061,6 +1090,14 @@ export function Canvas({
         } else {
           // No previousProps (mouseDown not captured) — still sync
           const currentProps = getObjectProps(obj);
+          // Prevent filter-view positions from leaking to Firestore
+          if (isFilterActiveRef.current && filterPositionSnapshotRef.current) {
+            const original = filterPositionSnapshotRef.current.get(id);
+            if (original) {
+              currentProps.left = original.left;
+              currentProps.top = original.top;
+            }
+          }
           // Normalize origin
           if (obj.originX !== 'left' || obj.originY !== 'top') {
             obj.set({ left: currentProps.left, top: currentProps.top, originX: 'left', originY: 'top' });
@@ -2018,6 +2055,75 @@ export function Canvas({
     }
   }, [remoteCursors, fabricRef]);
 
+  // Local-only filter view: apply grouped positions to Fabric objects without touching Firestore
+  // NOTE: This effect must run BEFORE the sync effect so that on filter exit, snapshot
+  // positions are restored first, and the sync effect sees objects at original positions.
+  useEffect(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+
+    const wasActive = prevFilterActiveRef.current;
+    prevFilterActiveRef.current = isFilterActive;
+
+    if (isFilterActive && groupedPositions && groupedPositions.size > 0) {
+      // On enter: snapshot real positions from remoteObjects (Firestore source of truth),
+      // NOT from Fabric objects which may already have grouped positions applied by the sync effect.
+      if (!wasActive && remoteObjects) {
+        const snapshot = new Map<string, { left: number; top: number }>();
+        remoteObjects.forEach((obj, id) => {
+          snapshot.set(id, { left: obj.props.left, top: obj.props.top });
+        });
+        filterPositionSnapshotRef.current = snapshot;
+      }
+
+      // Apply grouped positions directly to Fabric objects
+      groupedPositions.forEach((pos, id) => {
+        const fabricObj = remoteObjectsRef.current.get(id);
+        if (fabricObj) {
+          fabricObj.set({ left: pos.left, top: pos.top });
+          fabricObj.setCoords();
+        }
+      });
+
+      // Hide/show objects based on activeFilter
+      if (activeFilter !== null && remoteObjects) {
+        // Specific classification selected — hide non-matching objects
+        remoteObjectsRef.current.forEach((fabricObj, id) => {
+          const remoteObj = remoteObjects.get(id);
+          const matches = remoteObj?.classification === activeFilter;
+          fabricObj.set({ visible: matches });
+        });
+        // Deselect if the active object is now hidden
+        const activeObj = canvas.getActiveObject();
+        if (activeObj && !(activeObj as any).visible) {
+          canvas.discardActiveObject();
+        }
+      } else {
+        // "All groups" — show all objects
+        remoteObjectsRef.current.forEach((fabricObj) => {
+          fabricObj.set({ visible: true });
+        });
+      }
+
+      canvas.requestRenderAll();
+    } else if (!isFilterActive && wasActive) {
+      // On exit: restore original positions and make all objects visible
+      const snapshot = filterPositionSnapshotRef.current;
+      if (snapshot) {
+        remoteObjectsRef.current.forEach((fabricObj, id) => {
+          const original = snapshot.get(id);
+          if (original) {
+            fabricObj.set({ left: original.left, top: original.top });
+            fabricObj.setCoords();
+          }
+          fabricObj.set({ visible: true });
+        });
+        filterPositionSnapshotRef.current = null;
+        canvas.requestRenderAll();
+      }
+    }
+  }, [fabricRef, isFilterActive, groupedPositions, remoteObjects, activeFilter]);
+
   // Sync remote objects to canvas
   useEffect(() => {
     const t0 = performance.now();
@@ -2087,10 +2193,15 @@ export function Canvas({
         }
         // Update existing object — but preserve buffered text if it exists
         const buffered = textBufferRef.current.get(id);
+        // During filter view, preserve Fabric's current position (grouped layout)
+        // instead of animating toward Firestore positions
+        const effectiveObj = isFilterActive
+          ? { ...obj, props: { ...obj.props, left: existingLocal.left ?? obj.props.left, top: existingLocal.top ?? obj.props.top } }
+          : obj;
         if (buffered !== undefined && (obj.type === 'sticky' || obj.type === 'textbox')) {
-          updateFabricObject(existingLocal, { ...obj, props: { ...obj.props, text: buffered } });
+          updateFabricObject(existingLocal, { ...effectiveObj, props: { ...effectiveObj.props, text: buffered } });
         } else {
-          updateFabricObject(existingLocal, obj);
+          updateFabricObject(existingLocal, effectiveObj);
         }
         return;
       }
@@ -2103,6 +2214,12 @@ export function Canvas({
       const fabricObj = createFabricObject(objToCreate);
       if (fabricObj) {
         (fabricObj as FabricObject & { id: string }).id = id;
+        // Hide new objects that don't match the active filter during filter view
+        if (isFilterActive && activeFilter !== null) {
+          if (obj.classification !== activeFilter) {
+            fabricObj.set({ visible: false });
+          }
+        }
         canvas.add(fabricObj);
         remoteObjectsRef.current.set(id, fabricObj);
       }
@@ -2116,7 +2233,7 @@ export function Canvas({
       }
     });
 
-    // Re-apply filter view positions after sync so Firestore updates don't fight the local layout
+    // Re-apply filter view positions and visibility after sync so Firestore updates don't fight the local layout
     if (isFilterActive && groupedPositions && groupedPositions.size > 0) {
       groupedPositions.forEach((pos, id) => {
         const fabricObj = remoteObjectsRef.current.get(id);
@@ -2125,6 +2242,13 @@ export function Canvas({
           fabricObj.setCoords();
         }
       });
+      // Re-apply visibility
+      if (activeFilter !== null && remoteObjects) {
+        remoteObjectsRef.current.forEach((fabricObj, id) => {
+          const remoteObj = remoteObjects.get(id);
+          fabricObj.set({ visible: remoteObj?.classification === activeFilter });
+        });
+      }
     }
 
     // pendingDeletionRef entries are cleared when redo re-creates the object
@@ -2157,52 +2281,7 @@ export function Canvas({
     canvas.renderAll();
     const dt = performance.now() - t0;
     if (dt > 5) console.warn(`[Perf] Canvas sync: ${dt.toFixed(1)}ms, ${remoteObjects?.size ?? 0} objects`);
-  }, [fabricRef, remoteObjects, setTool, isFilterActive, groupedPositions]);
-
-  // Local-only filter view: apply grouped positions to Fabric objects without touching Firestore
-  useEffect(() => {
-    const canvas = fabricRef.current;
-    if (!canvas) return;
-
-    const wasActive = prevFilterActiveRef.current;
-    prevFilterActiveRef.current = isFilterActive;
-
-    if (isFilterActive && groupedPositions && groupedPositions.size > 0) {
-      // On enter: snapshot real positions from remoteObjects (Firestore source of truth),
-      // NOT from Fabric objects which may already have grouped positions applied by the sync effect.
-      if (!wasActive && remoteObjects) {
-        const snapshot = new Map<string, { left: number; top: number }>();
-        remoteObjects.forEach((obj, id) => {
-          snapshot.set(id, { left: obj.props.left, top: obj.props.top });
-        });
-        filterPositionSnapshotRef.current = snapshot;
-      }
-
-      // Apply grouped positions directly to Fabric objects
-      groupedPositions.forEach((pos, id) => {
-        const fabricObj = remoteObjectsRef.current.get(id);
-        if (fabricObj) {
-          fabricObj.set({ left: pos.left, top: pos.top });
-          fabricObj.setCoords();
-        }
-      });
-      canvas.requestRenderAll();
-    } else if (!isFilterActive && wasActive) {
-      // On exit: restore original positions from snapshot
-      const snapshot = filterPositionSnapshotRef.current;
-      if (snapshot) {
-        remoteObjectsRef.current.forEach((fabricObj, id) => {
-          const original = snapshot.get(id);
-          if (original) {
-            fabricObj.set({ left: original.left, top: original.top });
-            fabricObj.setCoords();
-          }
-        });
-        filterPositionSnapshotRef.current = null;
-        canvas.requestRenderAll();
-      }
-    }
-  }, [fabricRef, isFilterActive, groupedPositions, remoteObjects]);
+  }, [fabricRef, remoteObjects, setTool, isFilterActive, groupedPositions, activeFilter]);
 
   // Restack Fabric objects by zIndex — only when zIndex values actually change
   useEffect(() => {
@@ -2554,47 +2633,32 @@ export function Canvas({
       {floatingMenu}
 
       {/* Classification badges overlay */}
-      {isFilterActive && getClassificationColor && remoteObjects && fabricRef.current && (() => {
+      {isFilterActive && getClassificationColor && clusterBadges && clusterBadges.length > 0 && fabricRef.current && (() => {
         const canvas = fabricRef.current!;
         const zoom = canvas.getZoom();
         const vpt = canvas.viewportTransform;
         if (!vpt) return null;
-        const badges: { id: string; x: number; y: number; color: string; label: string; dimmed: boolean }[] = [];
-        remoteObjects.forEach((obj, id) => {
-          if (!obj.classification) return;
-          const fabricObj = remoteObjectsRef.current.get(id);
-          if (!fabricObj) return;
-          const bounds = fabricObj.getBoundingRect();
-          const screenX = bounds.left * zoom + vpt[4];
-          const screenY = bounds.top * zoom + vpt[5];
-          const dimmed = isFilterActive && activeFilter !== null && obj.classification !== activeFilter;
-          badges.push({
-            id,
-            x: screenX - 4,
-            y: screenY - 4,
-            color: getClassificationColor(obj.classification),
-            label: obj.classification,
-            dimmed,
-          });
-        });
-        return badges.map((b) => (
-          <div
-            key={`cls-badge-${b.id}`}
-            className="absolute pointer-events-none z-20 flex items-center gap-1"
-            style={{
-              left: b.x,
-              top: b.y,
-              opacity: b.dimmed ? 0.3 : 1,
-              transform: 'translate(-50%, -50%)',
-            }}
-          >
+        return clusterBadges.map((badge, i) => {
+          const screenX = badge.left * zoom + vpt[4] - 4;
+          const screenY = badge.top * zoom + vpt[5] - 4;
+          return (
             <div
-              className="w-3.5 h-3.5 rounded-full border-2 border-white shadow-sm"
-              style={{ backgroundColor: b.color }}
-              title={b.label}
-            />
-          </div>
-        ));
+              key={`cls-badge-${i}`}
+              className="absolute pointer-events-none z-20 flex items-center gap-1"
+              style={{
+                left: screenX,
+                top: screenY,
+                transform: 'translate(-50%, -50%)',
+              }}
+            >
+              <div
+                className="w-3.5 h-3.5 rounded-full border-2 border-white shadow-sm"
+                style={{ backgroundColor: getClassificationColor(badge.classification) }}
+                title={badge.classification}
+              />
+            </div>
+          );
+        });
       })()}
 
       {/* When a remote user interacts with an object, only the colored outline is shown (no name badge) */}

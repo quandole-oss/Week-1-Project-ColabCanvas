@@ -35,6 +35,8 @@ export interface ClassificationFilterState {
   filteredObjects: Map<string, CanvasObject>;
   // Computed: grouped positions for filter view
   groupedPositions: Map<string, { left: number; top: number }>;
+  // Pre-computed badge positions for cluster labels (one per cluster)
+  clusterBadges: Array<{ left: number; top: number; classification: string }>;
   // Actions
   setActiveFilter: (classification: string | null) => void;
   enterFilterView: (classification: string | null) => void;
@@ -50,62 +52,85 @@ export interface ClassificationFilterState {
 // Layout constants for grouped view
 const GROUP_HEADER_HEIGHT = 50;
 const GROUP_PADDING = 40;
-const OBJECT_SPACING = 20;
-const OBJECTS_PER_ROW = 4;
-const OBJECT_CELL_WIDTH = 220;
-const OBJECT_CELL_HEIGHT = 200;
+const CLUSTER_GAP = 100; // px — objects within this distance are spatially clustered
+const MAX_ROW_WIDTH = 1200; // px — clusters wrap to next row beyond this width
 
-/** Compute the actual bounding box of a single CanvasObject. */
-function getObjectBounds(obj: CanvasObject): { left: number; top: number; right: number; bottom: number } {
-  const p = obj.props;
-  const scaleX = p.scaleX ?? 1;
-  const scaleY = p.scaleY ?? 1;
-  let w: number, h: number;
-
-  if (obj.type === 'circle') {
-    const r = p.radius ?? 50;
-    w = r * 2 * scaleX;
-    h = r * 2 * scaleY;
-  } else {
-    w = (p.width ?? 100) * scaleX;
-    h = (p.height ?? 100) * scaleY;
-  }
-
-  return { left: p.left, top: p.top, right: p.left + w, bottom: p.top + h };
+function getObjectBounds(obj: CanvasObject) {
+  const left = obj.props.left ?? 0;
+  const top = obj.props.top ?? 0;
+  const width = obj.props.width ?? 100;
+  const height = obj.props.height ?? 100;
+  return { left, top, right: left + width, bottom: top + height, width, height };
 }
 
-/** Compute the bounding box enclosing all objects in a group. */
-function getGroupBounds(objects: CanvasObject[]): { left: number; top: number; width: number; height: number } {
-  let minLeft = Infinity, minTop = Infinity, maxRight = -Infinity, maxBottom = -Infinity;
+function getGroupBounds(objects: CanvasObject[]) {
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
   for (const obj of objects) {
     const b = getObjectBounds(obj);
-    if (b.left < minLeft) minLeft = b.left;
-    if (b.top < minTop) minTop = b.top;
-    if (b.right > maxRight) maxRight = b.right;
-    if (b.bottom > maxBottom) maxBottom = b.bottom;
+    if (b.left < left) left = b.left;
+    if (b.top < top) top = b.top;
+    if (b.right > right) right = b.right;
+    if (b.bottom > bottom) bottom = b.bottom;
   }
-  return { left: minLeft, top: minTop, width: maxRight - minLeft, height: maxBottom - minTop };
+  return { left, top, right, bottom, width: right - left, height: bottom - top };
+}
+
+function clusterObjects(objects: CanvasObject[]): CanvasObject[][] {
+  if (objects.length === 0) return [];
+  if (objects.length === 1) return [objects];
+
+  // Union-Find to group spatially close objects
+  const parent = objects.map((_, i) => i);
+  function find(i: number): number {
+    while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+    return i;
+  }
+  function union(a: number, b: number) {
+    parent[find(a)] = find(b);
+  }
+
+  // Union objects whose bounding boxes are within CLUSTER_GAP of each other
+  for (let i = 0; i < objects.length; i++) {
+    const bi = getObjectBounds(objects[i]);
+    for (let j = i + 1; j < objects.length; j++) {
+      const bj = getObjectBounds(objects[j]);
+      const horizDist = Math.max(0, Math.max(bi.left, bj.left) - Math.min(bi.right, bj.right));
+      const vertDist = Math.max(0, Math.max(bi.top, bj.top) - Math.min(bi.bottom, bj.bottom));
+      if (horizDist <= CLUSTER_GAP && vertDist <= CLUSTER_GAP) {
+        union(i, j);
+      }
+    }
+  }
+
+  // Collect clusters
+  const clusterMap = new Map<number, CanvasObject[]>();
+  objects.forEach((obj, i) => {
+    const root = find(i);
+    if (!clusterMap.has(root)) clusterMap.set(root, []);
+    clusterMap.get(root)!.push(obj);
+  });
+
+  // Sort clusters by size descending for visual priority
+  return Array.from(clusterMap.values()).sort((a, b) => b.length - a.length);
 }
 
 function computeGroupedPositions(
   objects: Map<string, CanvasObject>,
   activeFilter: string | null
-): Map<string, { left: number; top: number }> {
+): { positions: Map<string, { left: number; top: number }>; clusterBadges: Array<{ left: number; top: number; classification: string }> } {
   const positions = new Map<string, { left: number; top: number }>();
+  const clusterBadges: Array<{ left: number; top: number; classification: string }> = [];
 
   // Group objects by classification
   const groups = new Map<string, CanvasObject[]>();
-  const unclassified: CanvasObject[] = [];
 
   objects.forEach((obj) => {
     if (activeFilter !== null) {
-      // When filtering to one classification, only show those + unclassified dimmed
+      // When filtering to one classification, only position matching objects
       if (obj.classification === activeFilter) {
         const list = groups.get(activeFilter) || [];
         list.push(obj);
         groups.set(activeFilter, list);
-      } else {
-        unclassified.push(obj);
       }
     } else {
       // Show all, grouped by classification
@@ -133,35 +158,44 @@ function computeGroupedPositions(
 
     currentY += GROUP_HEADER_HEIGHT;
 
-    // Translate the group as a rigid body — preserve relative positions
-    const groupBounds = getGroupBounds(groupObjects);
-    const offsetX = startX - groupBounds.left;
-    const offsetY = currentY - groupBounds.top;
+    // Split group into spatial clusters and lay them out compactly
+    const clusters = clusterObjects(groupObjects);
+    let rowX = startX;
+    let rowMaxHeight = 0;
 
-    for (const obj of groupObjects) {
-      positions.set(obj.id, {
-        left: obj.props.left + offsetX,
-        top: obj.props.top + offsetY,
-      });
+    for (const cluster of clusters) {
+      const clusterBounds = getGroupBounds(cluster);
+
+      // Wrap to next row if this cluster would exceed max width
+      if (rowX > startX && rowX + clusterBounds.width > MAX_ROW_WIDTH) {
+        currentY += rowMaxHeight + GROUP_PADDING;
+        rowX = startX;
+        rowMaxHeight = 0;
+      }
+
+      // Rigid-body translate cluster (preserves internal spatial relationships)
+      const offsetX = rowX - clusterBounds.left;
+      const offsetY = currentY - clusterBounds.top;
+      for (const obj of cluster) {
+        positions.set(obj.id, {
+          left: (obj.props.left ?? 0) + offsetX,
+          top: (obj.props.top ?? 0) + offsetY,
+        });
+      }
+
+      // Add a badge at the cluster's top-left position (skip unclassified groups)
+      if (groupName !== '__unclassified__') {
+        clusterBadges.push({ left: rowX, top: currentY, classification: groupName });
+      }
+
+      rowX += clusterBounds.width + GROUP_PADDING;
+      rowMaxHeight = Math.max(rowMaxHeight, clusterBounds.height);
     }
 
-    currentY += groupBounds.height + GROUP_PADDING;
+    currentY += rowMaxHeight + GROUP_PADDING;
   }
 
-  // Position unclassified objects at bottom in compact grid (only in single-filter mode)
-  if (activeFilter !== null && unclassified.length > 0) {
-    currentY += GROUP_HEADER_HEIGHT;
-    unclassified.forEach((obj, idx) => {
-      const col = idx % OBJECTS_PER_ROW;
-      const row = Math.floor(idx / OBJECTS_PER_ROW);
-      positions.set(obj.id, {
-        left: startX + col * (OBJECT_CELL_WIDTH + OBJECT_SPACING),
-        top: currentY + row * (OBJECT_CELL_HEIGHT + OBJECT_SPACING),
-      });
-    });
-  }
-
-  return positions;
+  return { positions, clusterBadges };
 }
 
 export function useClassificationFilter(
@@ -191,10 +225,11 @@ export function useClassificationFilter(
     return objects;
   }, [objects, activeFilter, isFilterActive]);
 
-  // Compute grouped positions for filter view
-  const groupedPositions = useMemo(() => {
-    if (!isFilterActive) return new Map();
-    return computeGroupedPositions(objects, activeFilter);
+  // Compute grouped positions and cluster badges for filter view
+  const { groupedPositions, clusterBadges } = useMemo(() => {
+    if (!isFilterActive) return { groupedPositions: new Map<string, { left: number; top: number }>(), clusterBadges: [] as Array<{ left: number; top: number; classification: string }> };
+    const result = computeGroupedPositions(objects, activeFilter);
+    return { groupedPositions: result.positions, clusterBadges: result.clusterBadges };
   }, [objects, activeFilter, isFilterActive]);
 
   const setActiveFilter = useCallback((classification: string | null) => {
@@ -240,6 +275,7 @@ export function useClassificationFilter(
     isFilterActive,
     filteredObjects,
     groupedPositions,
+    clusterBadges,
     setActiveFilter,
     enterFilterView,
     exitFilterView,

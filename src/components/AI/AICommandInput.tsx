@@ -120,11 +120,14 @@ export function AICommandInput({ onSubmit, isProcessing, messages, inputRef }: A
           {[
             'Blue rect',
             'Grid 3x3',
+            'Cluster notes',
           ].map((cmd) => (
             <button
               key={cmd}
               onClick={() => {
-                const fullCmd = cmd === 'Blue rect' ? 'Create a blue rectangle' : 'Create a 3x3 grid';
+                const fullCmd = cmd === 'Blue rect' ? 'Create a blue rectangle'
+                  : cmd === 'Grid 3x3' ? 'Create a 3x3 grid'
+                  : 'Cluster these sticky notes by theme';
                 setInput(fullCmd);
                 onSubmit(fullCmd);
                 setIsExpanded(true);

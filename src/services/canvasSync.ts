@@ -4,6 +4,7 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  deleteField,
   onSnapshot,
   query,
   orderBy,
@@ -164,6 +165,25 @@ export async function batchUpdateObjectZIndices(
   }
 
   await batch.commit();
+}
+
+// Update only the classification of an object
+export async function updateObjectClassification(
+  roomId: string,
+  objectId: string,
+  classification: string | null,
+  userId: string
+): Promise<void> {
+  if (!db) throw new Error('Firestore not initialized');
+  const objectRef = doc(db, 'rooms', roomId, 'objects', objectId);
+  const now = Timestamp.now();
+  const update: Record<string, unknown> = { updatedBy: userId, updatedAt: now };
+  if (classification === null) {
+    update['classification'] = deleteField();
+  } else {
+    update['classification'] = classification;
+  }
+  await updateDoc(objectRef, update);
 }
 
 // Delete an object

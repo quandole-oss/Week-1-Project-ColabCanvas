@@ -338,6 +338,36 @@ export const AI_TOOLS = [
       },
     },
   },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'createGroup',
+      description: 'Create a labeled visual frame (background rectangle + label) around a set of objects to visually group them. Calculates bounding box automatically from the referenced objects.',
+      parameters: {
+        type: 'object',
+        properties: {
+          label: {
+            type: 'string',
+            description: 'Label text displayed above the group frame',
+          },
+          objectIds: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Array of object IDs to group together',
+          },
+          color: {
+            type: 'string',
+            description: 'Theme color for the group frame (hex code). Used for frame stroke and label color. Background will be a semi-transparent version.',
+          },
+          padding: {
+            type: 'number',
+            description: 'Padding around the group in pixels (default 30)',
+          },
+        },
+        required: ['label', 'objectIds', 'color'],
+      },
+    },
+  },
 ];
 
 export interface AIAction {
@@ -373,7 +403,7 @@ const VALID_ACTION_TYPES = new Set([
   'createShape', 'moveObject', 'resizeObject', 'rotateObject',
   'updateObject', 'deleteObject', 'arrangeObjects', 'createLoginForm',
   'createNavigationBar', 'getCanvasState',
-  'duplicateObject', 'reorderObject',
+  'duplicateObject', 'reorderObject', 'createGroup',
 ]);
 
 const VALID_SHAPE_TYPES = new Set([
@@ -671,6 +701,10 @@ export function executeAIAction(
         id,
         type: obj.type,
         position: { x: obj.props.left, y: obj.props.top },
+        ...(obj.props.width ? { width: obj.props.width } : {}),
+        ...(obj.props.height ? { height: obj.props.height } : {}),
+        ...(obj.props.fill ? { fill: obj.props.fill } : {}),
+        ...(obj.props.text ? { text: obj.props.text } : {}),
       }));
       return { success: true, message: JSON.stringify(objects, null, 2) };
     }
@@ -711,6 +745,69 @@ export function executeAIAction(
         reorderObject(objectId, reorderAction);
       }
       return { success: true, message: `Reordered object ${objectId}: ${reorderAction}` };
+    }
+
+    case 'createGroup': {
+      const { label, objectIds, color, padding = 30 } = params as {
+        label: string;
+        objectIds: string[];
+        color: string;
+        padding?: number;
+      };
+
+      // Calculate bounding box from referenced objects
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      let found = 0;
+      for (const objId of objectIds) {
+        const obj = canvasObjects.get(objId);
+        if (!obj) continue;
+        found++;
+        const left = obj.props.left ?? 0;
+        const top = obj.props.top ?? 0;
+        const w = obj.props.width ?? (obj.props.radius ? obj.props.radius * 2 : 100);
+        const h = obj.props.height ?? (obj.props.radius ? obj.props.radius * 2 : 100);
+        minX = Math.min(minX, left);
+        minY = Math.min(minY, top);
+        maxX = Math.max(maxX, left + w);
+        maxY = Math.max(maxY, top + h);
+      }
+
+      if (found === 0) {
+        return { success: false, message: 'No valid objects found for group' };
+      }
+
+      const labelHeight = 30;
+      const createdIds: string[] = [];
+
+      // Create semi-transparent background rect with the theme color as stroke
+      const bgId = createObject('rect', {
+        left: minX - padding,
+        top: minY - padding - labelHeight,
+        width: (maxX - minX) + padding * 2,
+        height: (maxY - minY) + padding * 2 + labelHeight,
+        fill: color + '15',
+        stroke: color,
+        strokeWidth: 2,
+      });
+      createdIds.push(bgId);
+
+      // Create label textbox positioned above the group content
+      const labelId = createObject('textbox', {
+        left: minX - padding + 10,
+        top: minY - padding - labelHeight + 5,
+        width: (maxX - minX) + padding * 2 - 20,
+        height: labelHeight,
+        fill: '',
+        stroke: 'transparent',
+        strokeWidth: 0,
+        text: label,
+        fontSize: 14,
+        fontFamily: 'sans-serif',
+        textColor: color,
+      });
+      createdIds.push(labelId);
+
+      return { success: true, message: `Created group "${label}" around ${found} objects`, createdIds };
     }
 
     default:
