@@ -30,6 +30,7 @@ export interface CanvasObject {
   id: string;
   type: ShapeType;
   props: CanvasObjectProps;
+  classification?: string;
   zIndex: number;
   createdBy: string;
   createdAt: Timestamp;

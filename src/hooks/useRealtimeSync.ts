@@ -8,6 +8,7 @@ import {
   deleteObject,
   updateObjectZIndex as syncUpdateObjectZIndex,
   batchUpdateObjectZIndices as syncBatchUpdateObjectZIndices,
+  updateObjectClassification as syncUpdateObjectClassification,
   subscribeToObjects,
   ensureRoom,
 } from '../services/canvasSync';
@@ -626,6 +627,47 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
     }
   }, []);
 
+  // Update the classification of an object
+  const updateObjectClassification = useCallback(
+    async (id: string, classification: string | null) => {
+      // Optimistic local update
+      setObjects((prev) => {
+        const next = new Map(prev);
+        const obj = next.get(id);
+        if (obj) {
+          const updated = { ...obj, updatedBy: odId, updatedAt: Timestamp.now() };
+          if (classification === null) {
+            delete updated.classification;
+          } else {
+            updated.classification = classification;
+          }
+          next.set(id, updated);
+        }
+        return next;
+      });
+
+      if (isFirebaseConfigured) {
+        localPendingUpdates.current.set(id, (localPendingUpdates.current.get(id) ?? 0) + 1);
+        try {
+          await syncUpdateObjectClassification(roomId, id, classification, odId);
+        } catch (error) {
+          console.error('Failed to update classification:', error);
+        }
+      } else if (broadcastChannel.current) {
+        // Demo mode: broadcast via existing update mechanism
+        const obj = objectsRef.current.get(id);
+        if (obj) {
+          broadcastChannel.current.postMessage({
+            type: 'update',
+            id,
+            props: obj.props,
+          } as SyncMessage);
+        }
+      }
+    },
+    [roomId, odId]
+  );
+
   const getObjectById = useCallback((id: string) => objectsRef.current.get(id), []);
 
   return {
@@ -644,5 +686,6 @@ export function useRealtimeSync({ roomId, odId }: UseRealtimeSyncOptions) {
     setActiveObjectIds,
     getActiveObjectIds,
     getObjectById,
+    updateObjectClassification,
   };
 }

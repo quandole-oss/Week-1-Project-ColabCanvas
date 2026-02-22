@@ -300,6 +300,9 @@ function parseCount(command: string): number {
 function canHandleLocally(command: string): boolean {
   const lc = command.toLowerCase();
 
+  // Semantic/AI operations — always route to cloud
+  if (/\b(cluster|group\s+(?:by|related|similar)|categorize|organize|summarize|summary|synthesize|clean\s*up\s+(?:the\s+)?board)\b/i.test(lc)) return false;
+
   // Templates (registry-based + legacy)
   if (findTemplate(lc)) return true;
   if (lc.includes('login') && /form|page|screen/.test(lc)) return true;
