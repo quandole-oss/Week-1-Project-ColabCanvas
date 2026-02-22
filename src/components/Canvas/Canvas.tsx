@@ -41,6 +41,14 @@ interface CanvasProps {
   onActiveObjectsChange?: (ids: Set<string> | null) => void;
   remoteCursors?: Map<string, CursorState>;
   remoteObjects?: Map<string, CanvasObject>;
+  // Classification system
+  classifications?: string[];
+  onClassifyObject?: (ids: string[], classification: string | null) => void;
+  getClassificationColor?: (classification: string) => string;
+  isFilterActive?: boolean;
+  activeFilter?: string | null;
+  groupedPositions?: Map<string, { left: number; top: number }>;
+  clusterBadges?: Array<{ left: number; top: number; classification: string }>;
 }
 
 export function Canvas({
@@ -60,6 +68,13 @@ export function Canvas({
   onActiveObjectsChange,
   remoteCursors = new Map(),
   remoteObjects,
+  classifications = [],
+  onClassifyObject,
+  getClassificationColor,
+  isFilterActive = false,
+  activeFilter = null,
+  groupedPositions,
+  clusterBadges,
 }: CanvasProps) {
   const canvasElRef = useRef<HTMLCanvasElement>(null);
   const objectCountRef = useRef(0);
@@ -97,6 +112,13 @@ export function Canvas({
   const suppressModifiedRef = useRef(false);
   // Track zIndex signature to avoid restacking on every remoteObjects change
   const zIndexSignatureRef = useRef<string>('');
+  // Snapshot of real Fabric positions before filter view rearranges them (local-only)
+  const filterPositionSnapshotRef = useRef<Map<string, { left: number; top: number }> | null>(null);
+  // Track previous isFilterActive to detect transitions
+  const prevFilterActiveRef = useRef(false);
+  // Mirror isFilterActive into a ref so event-handler closures can access current state
+  const isFilterActiveRef = useRef(false);
+  isFilterActiveRef.current = isFilterActive;
 
   const {
     fabricRef,
@@ -978,6 +1000,14 @@ export function Canvas({
             const previousProps = objectStateBeforeModifyRef.current.get(childId);
             if (previousProps) {
               const currentProps = postProcess(child, getObjectProps(child));
+              // Prevent filter-view positions from leaking to Firestore
+              if (isFilterActiveRef.current && filterPositionSnapshotRef.current) {
+                const original = filterPositionSnapshotRef.current.get(childId);
+                if (original) {
+                  currentProps.left = original.left;
+                  currentProps.top = original.top;
+                }
+              }
               if (JSON.stringify(previousProps) !== JSON.stringify(currentProps)) {
                 batchEntries.push({
                   type: 'modify',
@@ -991,6 +1021,14 @@ export function Canvas({
             } else {
               // Fallback: no previousProps captured — still sync current state
               const currentProps = postProcess(child, getObjectProps(child));
+              // Prevent filter-view positions from leaking to Firestore
+              if (isFilterActiveRef.current && filterPositionSnapshotRef.current) {
+                const original = filterPositionSnapshotRef.current.get(childId);
+                if (original) {
+                  currentProps.left = original.left;
+                  currentProps.top = original.top;
+                }
+              }
               fallbackSyncEntries.push({ id: childId, props: currentProps });
             }
           }
@@ -1021,6 +1059,14 @@ export function Canvas({
         const previousProps = objectStateBeforeModifyRef.current.get(id);
         if (previousProps) {
           const currentProps = getObjectProps(obj);
+          // Prevent filter-view positions from leaking to Firestore
+          if (isFilterActiveRef.current && filterPositionSnapshotRef.current) {
+            const original = filterPositionSnapshotRef.current.get(id);
+            if (original) {
+              currentProps.left = original.left;
+              currentProps.top = original.top;
+            }
+          }
           // Only add to history if something actually changed
           if (JSON.stringify(previousProps) !== JSON.stringify(currentProps)) {
             addToHistory({
@@ -1044,6 +1090,14 @@ export function Canvas({
         } else {
           // No previousProps (mouseDown not captured) — still sync
           const currentProps = getObjectProps(obj);
+          // Prevent filter-view positions from leaking to Firestore
+          if (isFilterActiveRef.current && filterPositionSnapshotRef.current) {
+            const original = filterPositionSnapshotRef.current.get(id);
+            if (original) {
+              currentProps.left = original.left;
+              currentProps.top = original.top;
+            }
+          }
           // Normalize origin
           if (obj.originX !== 'left' || obj.originY !== 'top') {
             obj.set({ left: currentProps.left, top: currentProps.top, originX: 'left', originY: 'top' });
@@ -2001,6 +2055,75 @@ export function Canvas({
     }
   }, [remoteCursors, fabricRef]);
 
+  // Local-only filter view: apply grouped positions to Fabric objects without touching Firestore
+  // NOTE: This effect must run BEFORE the sync effect so that on filter exit, snapshot
+  // positions are restored first, and the sync effect sees objects at original positions.
+  useEffect(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+
+    const wasActive = prevFilterActiveRef.current;
+    prevFilterActiveRef.current = isFilterActive;
+
+    if (isFilterActive && groupedPositions && groupedPositions.size > 0) {
+      // On enter: snapshot real positions from remoteObjects (Firestore source of truth),
+      // NOT from Fabric objects which may already have grouped positions applied by the sync effect.
+      if (!wasActive && remoteObjects) {
+        const snapshot = new Map<string, { left: number; top: number }>();
+        remoteObjects.forEach((obj, id) => {
+          snapshot.set(id, { left: obj.props.left, top: obj.props.top });
+        });
+        filterPositionSnapshotRef.current = snapshot;
+      }
+
+      // Apply grouped positions directly to Fabric objects
+      groupedPositions.forEach((pos, id) => {
+        const fabricObj = remoteObjectsRef.current.get(id);
+        if (fabricObj) {
+          fabricObj.set({ left: pos.left, top: pos.top });
+          fabricObj.setCoords();
+        }
+      });
+
+      // Hide/show objects based on activeFilter
+      if (activeFilter !== null && remoteObjects) {
+        // Specific classification selected — hide non-matching objects
+        remoteObjectsRef.current.forEach((fabricObj, id) => {
+          const remoteObj = remoteObjects.get(id);
+          const matches = remoteObj?.classification === activeFilter;
+          fabricObj.set({ visible: matches });
+        });
+        // Deselect if the active object is now hidden
+        const activeObj = canvas.getActiveObject();
+        if (activeObj && !(activeObj as any).visible) {
+          canvas.discardActiveObject();
+        }
+      } else {
+        // "All groups" — show all objects
+        remoteObjectsRef.current.forEach((fabricObj) => {
+          fabricObj.set({ visible: true });
+        });
+      }
+
+      canvas.requestRenderAll();
+    } else if (!isFilterActive && wasActive) {
+      // On exit: restore original positions and make all objects visible
+      const snapshot = filterPositionSnapshotRef.current;
+      if (snapshot) {
+        remoteObjectsRef.current.forEach((fabricObj, id) => {
+          const original = snapshot.get(id);
+          if (original) {
+            fabricObj.set({ left: original.left, top: original.top });
+            fabricObj.setCoords();
+          }
+          fabricObj.set({ visible: true });
+        });
+        filterPositionSnapshotRef.current = null;
+        canvas.requestRenderAll();
+      }
+    }
+  }, [fabricRef, isFilterActive, groupedPositions, remoteObjects, activeFilter]);
+
   // Sync remote objects to canvas
   useEffect(() => {
     const t0 = performance.now();
@@ -2070,10 +2193,15 @@ export function Canvas({
         }
         // Update existing object — but preserve buffered text if it exists
         const buffered = textBufferRef.current.get(id);
+        // During filter view, preserve Fabric's current position (grouped layout)
+        // instead of animating toward Firestore positions
+        const effectiveObj = isFilterActive
+          ? { ...obj, props: { ...obj.props, left: existingLocal.left ?? obj.props.left, top: existingLocal.top ?? obj.props.top } }
+          : obj;
         if (buffered !== undefined && (obj.type === 'sticky' || obj.type === 'textbox')) {
-          updateFabricObject(existingLocal, { ...obj, props: { ...obj.props, text: buffered } });
+          updateFabricObject(existingLocal, { ...effectiveObj, props: { ...effectiveObj.props, text: buffered } });
         } else {
-          updateFabricObject(existingLocal, obj);
+          updateFabricObject(existingLocal, effectiveObj);
         }
         return;
       }
@@ -2086,6 +2214,12 @@ export function Canvas({
       const fabricObj = createFabricObject(objToCreate);
       if (fabricObj) {
         (fabricObj as FabricObject & { id: string }).id = id;
+        // Hide new objects that don't match the active filter during filter view
+        if (isFilterActive && activeFilter !== null) {
+          if (obj.classification !== activeFilter) {
+            fabricObj.set({ visible: false });
+          }
+        }
         canvas.add(fabricObj);
         remoteObjectsRef.current.set(id, fabricObj);
       }
@@ -2098,6 +2232,24 @@ export function Canvas({
         remoteObjectsRef.current.delete(id);
       }
     });
+
+    // Re-apply filter view positions and visibility after sync so Firestore updates don't fight the local layout
+    if (isFilterActive && groupedPositions && groupedPositions.size > 0) {
+      groupedPositions.forEach((pos, id) => {
+        const fabricObj = remoteObjectsRef.current.get(id);
+        if (fabricObj) {
+          fabricObj.set({ left: pos.left, top: pos.top });
+          fabricObj.setCoords();
+        }
+      });
+      // Re-apply visibility
+      if (activeFilter !== null && remoteObjects) {
+        remoteObjectsRef.current.forEach((fabricObj, id) => {
+          const remoteObj = remoteObjects.get(id);
+          fabricObj.set({ visible: remoteObj?.classification === activeFilter });
+        });
+      }
+    }
 
     // pendingDeletionRef entries are cleared when redo re-creates the object
     // or when addToHistory resets the redo stack — not here, to avoid
@@ -2129,7 +2281,7 @@ export function Canvas({
     canvas.renderAll();
     const dt = performance.now() - t0;
     if (dt > 5) console.warn(`[Perf] Canvas sync: ${dt.toFixed(1)}ms, ${remoteObjects?.size ?? 0} objects`);
-  }, [fabricRef, remoteObjects, setTool]);
+  }, [fabricRef, remoteObjects, setTool, isFilterActive, groupedPositions, activeFilter]);
 
   // Restack Fabric objects by zIndex — only when zIndex values actually change
   useEffect(() => {
@@ -2370,6 +2522,93 @@ export function Canvas({
             </svg>
           </button>
 
+          {/* Classification tag selector (single + multi-select) */}
+          {onClassifyObject && classifications.length > 0 && (() => {
+            // Gather selected IDs
+            const selectedIds: string[] = [];
+            if (isMultiSelect && activeObj instanceof ActiveSelection) {
+              activeObj.getObjects().forEach((o) => {
+                const oid = (o as FabricObject & { id?: string }).id;
+                if (oid) selectedIds.push(oid);
+              });
+            } else if (activeObjId) {
+              selectedIds.push(activeObjId);
+            }
+            if (selectedIds.length === 0) return null;
+
+            // For single select, show current classification; for multi, show common classification
+            const selectedObjects = selectedIds.map((id) => remoteObjects?.get(id)).filter(Boolean);
+            const allSameCls = selectedObjects.length > 0 && selectedObjects.every((o) => o!.classification === selectedObjects[0]!.classification);
+            const currentCls = allSameCls ? selectedObjects[0]!.classification : undefined;
+            const clsColor = currentCls && getClassificationColor ? getClassificationColor(currentCls) : null;
+            const label = isMultiSelect ? `Tag ${selectedIds.length} objects` : (currentCls ? `Tagged: ${currentCls}` : 'Classify object');
+
+            return (
+              <div className="relative pointer-events-auto">
+                <button
+                  className="w-8 h-8 rounded-full flex items-center justify-center shadow-md transition"
+                  style={{
+                    backgroundColor: clsColor || '#6b7280',
+                  }}
+                  title={label}
+                  onClick={(e) => {
+                    const btn = e.currentTarget;
+                    const popup = btn.nextElementSibling as HTMLElement;
+                    if (popup) {
+                      popup.style.display = popup.style.display === 'none' ? 'block' : 'none';
+                    }
+                  }}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                    <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
+                    <line x1="7" y1="7" x2="7.01" y2="7" />
+                  </svg>
+                </button>
+                <div style={{ display: 'none' }} className="absolute left-10 top-0 bg-white/95 backdrop-blur-sm rounded-lg shadow-lg border border-gray-200 py-1 min-w-[140px] z-50">
+                  {isMultiSelect && (
+                    <div className="px-3 py-1 text-xs text-gray-400 border-b border-gray-100">
+                      {selectedIds.length} objects selected
+                    </div>
+                  )}
+                  {classifications.map((cls) => {
+                    const color = getClassificationColor ? getClassificationColor(cls) : '#6b7280';
+                    return (
+                      <button
+                        key={cls}
+                        className={`w-full flex items-center gap-2 px-3 py-1.5 text-sm text-left hover:bg-gray-50 transition ${
+                          currentCls === cls ? 'bg-gray-100 font-medium' : ''
+                        }`}
+                        onClick={() => {
+                          onClassifyObject(selectedIds, currentCls === cls ? null : cls);
+                        }}
+                      >
+                        <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+                        <span className="truncate">{cls}</span>
+                        {currentCls === cls && (
+                          <svg className="w-3 h-3 ml-auto text-indigo-500 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {currentCls && (
+                    <>
+                      <div className="border-t border-gray-100 my-1" />
+                      <button
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-left text-gray-500 hover:bg-gray-50 transition"
+                        onClick={() => onClassifyObject(selectedIds, null)}
+                      >
+                        <div className="w-2.5 h-2.5 rounded-full bg-gray-300 flex-shrink-0" />
+                        Remove tag
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Delete */}
           <button
             className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-md transition pointer-events-auto"
@@ -2392,6 +2631,35 @@ export function Canvas({
 
       {/* Floating context menu for selected object */}
       {floatingMenu}
+
+      {/* Classification badges overlay */}
+      {isFilterActive && getClassificationColor && clusterBadges && clusterBadges.length > 0 && fabricRef.current && (() => {
+        const canvas = fabricRef.current!;
+        const zoom = canvas.getZoom();
+        const vpt = canvas.viewportTransform;
+        if (!vpt) return null;
+        return clusterBadges.map((badge, i) => {
+          const screenX = badge.left * zoom + vpt[4] - 4;
+          const screenY = badge.top * zoom + vpt[5] - 4;
+          return (
+            <div
+              key={`cls-badge-${i}`}
+              className="absolute pointer-events-none z-20 flex items-center gap-1"
+              style={{
+                left: screenX,
+                top: screenY,
+                transform: 'translate(-50%, -50%)',
+              }}
+            >
+              <div
+                className="w-3.5 h-3.5 rounded-full border-2 border-white shadow-sm"
+                style={{ backgroundColor: getClassificationColor(badge.classification) }}
+                title={badge.classification}
+              />
+            </div>
+          );
+        });
+      })()}
 
       {/* When a remote user interacts with an object, only the colored outline is shown (no name badge) */}
 

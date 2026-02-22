@@ -1,6 +1,6 @@
-import { Profiler, useCallback, useEffect, useRef, useState } from 'react';
+import { Profiler, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { Canvas } from '../Canvas';
+import { Canvas, ClassificationPanel } from '../Canvas';
 import type { HistoryEntry } from '../Canvas';
 import { OnlineUsers } from '../Presence';
 import { AICommandInput } from '../AI';
@@ -9,6 +9,7 @@ import { useCursorSync } from '../../hooks/useCursorSync';
 import { usePresence } from '../../hooks/usePresence';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import { useAIAgent } from '../../hooks/useAIAgent';
+import { useClassificationFilter } from '../../hooks/useClassificationFilter';
 import type { CanvasObjectProps, ShapeType } from '../../types';
 import { computeNewZIndex, type ZIndexAction } from '../../utils/zIndex';
 
@@ -91,11 +92,46 @@ export function Room({ roomId }: RoomProps) {
     userColor: user.color,
   });
 
-  const { objects, isConnected, createObject, createObjects, updateObject, batchUpdateObjects, flushPendingUpdate, removeObject, clearAllObjects, setEditingObjectId, updateObjectZIndex, batchUpdateObjectZIndices, setActiveObjectIds, getActiveObjectIds, getObjectById } =
+  const { objects, isConnected, createObject, createObjects, updateObject, batchUpdateObjects, flushPendingUpdate, removeObject, clearAllObjects, setEditingObjectId, updateObjectZIndex, batchUpdateObjectZIndices, setActiveObjectIds, getActiveObjectIds, getObjectById, updateObjectClassification } =
     useRealtimeSync({
       roomId,
       odId: user.uid,
     });
+
+  // Classification filter system
+  const classificationFilter = useClassificationFilter(objects);
+
+  // Compute object counts per classification
+  const objectCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    objects.forEach((obj) => {
+      const cls = obj.classification || '__unclassified__';
+      counts.set(cls, (counts.get(cls) ?? 0) + 1);
+    });
+    return counts;
+  }, [objects]);
+
+  // Handle classification assignment from context menu (supports multi-select)
+  const handleClassifyObject = useCallback(
+    (ids: string[], classification: string | null) => {
+      for (const id of ids) {
+        updateObjectClassification(id, classification);
+      }
+    },
+    [updateObjectClassification]
+  );
+
+  // Handle entering/exiting filter view with position management
+  const handleEnterFilterView = useCallback(
+    (classification: string | null) => {
+      classificationFilter.enterFilterView(classification);
+    },
+    [classificationFilter]
+  );
+
+  const handleExitFilterView = useCallback(() => {
+    classificationFilter.exitFilterView();
+  }, [classificationFilter]);
 
   // Helper to add history entry (supports batching for AI operations)
   const addHistoryEntry = useCallback((entry: HistoryEntry) => {
@@ -346,6 +382,13 @@ export function Room({ roomId }: RoomProps) {
           onActiveObjectsChange={setActiveObjectIds}
           remoteCursors={remoteCursors}
           remoteObjects={objects}
+          classifications={classificationFilter.classifications}
+          onClassifyObject={handleClassifyObject}
+          getClassificationColor={classificationFilter.getClassificationColor}
+          isFilterActive={classificationFilter.isFilterActive}
+          activeFilter={classificationFilter.activeFilter}
+          groupedPositions={classificationFilter.groupedPositions}
+          clusterBadges={classificationFilter.clusterBadges}
         />
         </Profiler>
       </main>
@@ -359,6 +402,20 @@ export function Room({ roomId }: RoomProps) {
           presenceConnected={presenceConnected}
         />
       </div>
+
+      {/* Classification panel */}
+      <ClassificationPanel
+        classifications={classificationFilter.classifications}
+        activeFilter={classificationFilter.activeFilter}
+        isFilterActive={classificationFilter.isFilterActive}
+        objectCounts={objectCounts}
+        getClassificationColor={classificationFilter.getClassificationColor}
+        onEnterFilterView={handleEnterFilterView}
+        onExitFilterView={handleExitFilterView}
+        onAddClassification={classificationFilter.addClassification}
+        onRemoveClassification={classificationFilter.removeClassification}
+        onRenameClassification={classificationFilter.renameClassification}
+      />
 
       {/* AI Command Input */}
       <AICommandInput
